@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
 import type { MetricsResponse } from '../api';
+import { useFleet } from '../context/FleetContext';
 
 function ProgressRing({ percent, size = 120, stroke = 10 }: { percent: number; size?: number; stroke?: number }) {
   const radius = (size - stroke) / 2;
@@ -27,17 +28,7 @@ function ProgressRing({ percent, size = 120, stroke = 10 }: { percent: number; s
   );
 }
 
-function MetricCard({
-  label,
-  percent,
-  primary,
-  secondary,
-}: {
-  label: string;
-  percent: number;
-  primary: string;
-  secondary: string;
-}) {
+function MetricCard({ label, percent, primary, secondary }: { label: string; percent: number; primary: string; secondary: string }) {
   const color = percent >= 80 ? 'text-red-400' : percent >= 60 ? 'text-yellow-400' : 'text-green-400';
 
   return (
@@ -56,15 +47,19 @@ function MetricCard({
 }
 
 export default function MetricsPage() {
+  const { activeServer } = useFleet();
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [history, setHistory] = useState<MetricsResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
+  const base = activeServer?.host ?? '';
+
   const fetchMetrics = useCallback(async () => {
+    if (!activeServer) return;
     try {
-      const data = await get<MetricsResponse>('/metrics');
+      const data = await get<MetricsResponse>('/metrics', base);
       setMetrics(data);
       setHistory((prev) => [...prev.slice(-59), data]);
       setError(null);
@@ -73,14 +68,20 @@ export default function MetricsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeServer, base]);
 
   useEffect(() => {
+    setHistory([]);
+    setLoading(true);
     fetchMetrics();
     if (!autoRefresh) return;
     const interval = setInterval(fetchMetrics, 5000);
     return () => clearInterval(interval);
   }, [fetchMetrics, autoRefresh]);
+
+  if (!activeServer) {
+    return <div className="text-center py-20 text-gray-500">Select a server to view metrics.</div>;
+  }
 
   if (loading) {
     return (
@@ -136,24 +137,9 @@ export default function MetricsPage() {
       {/* Gauge cards */}
       {metrics && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <MetricCard
-            label="CPU Usage"
-            percent={metrics.cpu.usagePercent}
-            primary={`${metrics.cpu.usagePercent.toFixed(1)}%`}
-            secondary={`${metrics.cpu.cores} cores`}
-          />
-          <MetricCard
-            label="Memory"
-            percent={metrics.memory.usagePercent}
-            primary={`${metrics.memory.usedMb} / ${metrics.memory.totalMb} MB`}
-            secondary={`${(metrics.memory.totalMb - metrics.memory.usedMb)} MB free`}
-          />
-          <MetricCard
-            label="Disk"
-            percent={metrics.disk.usagePercent}
-            primary={`${metrics.disk.usedGb} / ${metrics.disk.totalGb} GB`}
-            secondary={`${(metrics.disk.totalGb - metrics.disk.usedGb).toFixed(1)} GB free`}
-          />
+          <MetricCard label="CPU Usage" percent={metrics.cpu.usagePercent} primary={`${metrics.cpu.usagePercent.toFixed(1)}%`} secondary={`${metrics.cpu.cores} cores`} />
+          <MetricCard label="Memory" percent={metrics.memory.usagePercent} primary={`${metrics.memory.usedMb} / ${metrics.memory.totalMb} MB`} secondary={`${(metrics.memory.totalMb - metrics.memory.usedMb)} MB free`} />
+          <MetricCard label="Disk" percent={metrics.disk.usagePercent} primary={`${metrics.disk.usedGb} / ${metrics.disk.totalGb} GB`} secondary={`${(metrics.disk.totalGb - metrics.disk.usedGb).toFixed(1)} GB free`} />
         </div>
       )}
 

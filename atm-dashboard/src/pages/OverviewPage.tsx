@@ -2,6 +2,7 @@ import type React from 'react';
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
 import type { HealthResponse, MetricsResponse, VersionResponse, GhVersionInfo } from '../api';
+import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 
 function formatUptime(ms: number): string {
@@ -36,18 +37,22 @@ function MetricBar({ label, value, total, unit, percent }: { label: string; valu
 }
 
 export default function OverviewPage() {
+  const { activeServer } = useFleet();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [version, setVersion] = useState<VersionResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const base = activeServer?.host ?? '';
+
   const fetchAll = useCallback(async () => {
+    if (!activeServer) return;
     try {
       const [h, m, v] = await Promise.all([
-        get<HealthResponse>('/health'),
-        get<MetricsResponse>('/metrics'),
-        get<VersionResponse>('/version'),
+        get<HealthResponse>('/health', base),
+        get<MetricsResponse>('/metrics', base),
+        get<VersionResponse>('/version', base),
       ]);
       setHealth(h);
       setMetrics(m);
@@ -58,13 +63,22 @@ export default function OverviewPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeServer, base]);
 
   useEffect(() => {
+    setLoading(true);
     fetchAll();
     const interval = setInterval(fetchAll, 10000);
     return () => clearInterval(interval);
   }, [fetchAll]);
+
+  if (!activeServer) {
+    return (
+      <div className="text-center py-20 text-gray-500">
+        Select a server to view its overview.
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -142,27 +156,9 @@ export default function OverviewPage() {
         <div>
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">System Resources</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <MetricBar
-              label="CPU"
-              value={metrics.cpu.usagePercent}
-              total={100}
-              unit={`% (${metrics.cpu.cores} cores)`}
-              percent={metrics.cpu.usagePercent}
-            />
-            <MetricBar
-              label="Memory"
-              value={metrics.memory.usedMb}
-              total={metrics.memory.totalMb}
-              unit="MB"
-              percent={metrics.memory.usagePercent}
-            />
-            <MetricBar
-              label="Disk"
-              value={metrics.disk.usedGb}
-              total={metrics.disk.totalGb}
-              unit="GB"
-              percent={metrics.disk.usagePercent}
-            />
+            <MetricBar label="CPU" value={metrics.cpu.usagePercent} total={100} unit={`% (${metrics.cpu.cores} cores)`} percent={metrics.cpu.usagePercent} />
+            <MetricBar label="Memory" value={metrics.memory.usedMb} total={metrics.memory.totalMb} unit="MB" percent={metrics.memory.usagePercent} />
+            <MetricBar label="Disk" value={metrics.disk.usedGb} total={metrics.disk.totalGb} unit="GB" percent={metrics.disk.usagePercent} />
           </div>
         </div>
       )}
@@ -198,9 +194,7 @@ export default function OverviewPage() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mt-4 pt-4 border-t border-gray-800">
                 <div>
                   <span className="text-gray-500 text-xs uppercase tracking-wider">Commit SHA</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs">
-                    {(version.ghosthands as GhVersionInfo).commit_sha.slice(0, 12)}
-                  </p>
+                  <p className="font-mono text-gray-200 mt-1 text-xs">{(version.ghosthands as GhVersionInfo).commit_sha.slice(0, 12)}</p>
                 </div>
                 <div>
                   <span className="text-gray-500 text-xs uppercase tracking-wider">Image Tag</span>
@@ -210,15 +204,11 @@ export default function OverviewPage() {
                 </div>
                 <div>
                   <span className="text-gray-500 text-xs uppercase tracking-wider">Build Time</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs">
-                    {new Date((version.ghosthands as GhVersionInfo).build_time).toLocaleString()}
-                  </p>
+                  <p className="font-mono text-gray-200 mt-1 text-xs">{new Date((version.ghosthands as GhVersionInfo).build_time).toLocaleString()}</p>
                 </div>
                 <div>
                   <span className="text-gray-500 text-xs uppercase tracking-wider">GH Uptime</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs">
-                    {formatUptime((version.ghosthands as GhVersionInfo).uptime_ms)}
-                  </p>
+                  <p className="font-mono text-gray-200 mt-1 text-xs">{formatUptime((version.ghosthands as GhVersionInfo).uptime_ms)}</p>
                 </div>
               </div>
             )}

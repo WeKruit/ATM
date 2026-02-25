@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
 import type { Deploy } from '../api';
+import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 import DataTable, { type Column } from '../components/DataTable';
 import LogStream from '../components/LogStream';
@@ -32,9 +33,7 @@ const columns: Column<Deploy>[] = [
     key: 'imageTag',
     label: 'Image Tag',
     mono: true,
-    render: (row) => (
-      <span className="text-gray-200">{row.imageTag}</span>
-    ),
+    render: (row) => <span className="text-gray-200">{row.imageTag}</span>,
   },
   {
     key: 'triggeredBy',
@@ -48,17 +47,13 @@ const columns: Column<Deploy>[] = [
   {
     key: 'startedAt',
     label: 'Started',
-    render: (row) => (
-      <span className="text-gray-400 text-xs">{timeAgo(row.startedAt)}</span>
-    ),
+    render: (row) => <span className="text-gray-400 text-xs">{timeAgo(row.startedAt)}</span>,
   },
   {
     key: 'durationMs',
     label: 'Duration',
     align: 'right' as const,
-    render: (row) => (
-      <span className="font-mono text-xs text-gray-300">{formatDuration(row.durationMs)}</span>
-    ),
+    render: (row) => <span className="font-mono text-xs text-gray-300">{formatDuration(row.durationMs)}</span>,
   },
   {
     key: 'error',
@@ -75,15 +70,19 @@ const columns: Column<Deploy>[] = [
 ];
 
 export default function DeploysPage() {
+  const { activeServer } = useFleet();
   const [deploys, setDeploys] = useState<Deploy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showStream, setShowStream] = useState(false);
   const [selected, setSelected] = useState<Deploy | null>(null);
 
+  const base = activeServer?.host ?? '';
+
   const fetchDeploys = useCallback(async () => {
+    if (!activeServer) return;
     try {
-      const data = await get<Deploy[]>('/deploys?limit=50');
+      const data = await get<Deploy[]>('/deploys?limit=50', base);
       setDeploys(data);
       setError(null);
     } catch (err) {
@@ -91,13 +90,18 @@ export default function DeploysPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeServer, base]);
 
   useEffect(() => {
+    setLoading(true);
     fetchDeploys();
     const interval = setInterval(fetchDeploys, 15000);
     return () => clearInterval(interval);
   }, [fetchDeploys]);
+
+  if (!activeServer) {
+    return <div className="text-center py-20 text-gray-500">Select a server to view deploys.</div>;
+  }
 
   return (
     <div className="space-y-6">
@@ -127,7 +131,7 @@ export default function DeploysPage() {
       {/* Live Stream */}
       {showStream && (
         <LogStream
-          url="/deploy/stream"
+          url={`${base}/deploy/stream`}
           active={showStream}
           onComplete={() => fetchDeploys()}
         />

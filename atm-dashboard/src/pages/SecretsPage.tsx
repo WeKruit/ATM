@@ -1,17 +1,26 @@
 import type React from 'react';
 import { useEffect, useState, useCallback } from 'react';
-import { get } from '../api';
-import type { SecretsStatus } from '../api';
+import { get, getWithAuth } from '../api';
+import type { SecretsStatus, SecretKey, SecretEntry } from '../api';
 import StatusBadge from '../components/StatusBadge';
+import { useFleet } from '../context/FleetContext';
 
 export default function SecretsPage() {
+  const { activeServer } = useFleet();
+  const base = activeServer?.host || '';
+
   const [status, setStatus] = useState<SecretsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [secret, setSecret] = useState(() => sessionStorage.getItem('atm-deploy-secret') || '');
+  const [keys, setKeys] = useState<SecretKey[]>([]);
+  const [keysLoading, setKeysLoading] = useState(false);
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [copied, setCopied] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const data = await get<SecretsStatus>('/secrets/status');
+      const data = await get<SecretsStatus>('/secrets/status', base);
       setStatus(data);
       setError(null);
     } catch (err) {
@@ -19,13 +28,48 @@ export default function SecretsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [base]);
 
   useEffect(() => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 30000);
     return () => clearInterval(interval);
   }, [fetchStatus]);
+
+  const handleSecretChange = (val: string) => {
+    setSecret(val);
+    sessionStorage.setItem('atm-deploy-secret', val);
+  };
+
+  const loadKeys = async () => {
+    if (!secret) return;
+    setKeysLoading(true);
+    try {
+      const data = await getWithAuth<SecretKey[]>('/secrets/list', secret, base);
+      setKeys(data);
+      setRevealed({});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load secrets');
+    } finally {
+      setKeysLoading(false);
+    }
+  };
+
+  const revealSecret = async (key: string) => {
+    if (!secret) return;
+    try {
+      const data = await getWithAuth<SecretEntry>(`/secrets/${encodeURIComponent(key)}`, secret, base);
+      setRevealed((prev) => ({ ...prev, [key]: data.value }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to reveal ${key}`);
+    }
+  };
+
+  const copyToClipboard = async (key: string, value: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopied(key);
+    setTimeout(() => setCopied(null), 2000);
+  };
 
   if (loading) {
     return (
@@ -55,6 +99,88 @@ export default function SecretsPage() {
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">
           {error}
+        </div>
+      )}
+
+      {/* Auth Section */}
+      <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
+        <h2 className="text-sm font-semibold text-gray-300 mb-3">Authentication</h2>
+        <div className="flex items-center gap-3">
+          <input
+            type="password"
+            value={secret}
+            onChange={(e) => handleSecretChange(e.target.value)}
+            placeholder="Deploy secret (X-Deploy-Secret)"
+            className="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600"
+          />
+          <button
+            onClick={loadKeys}
+            disabled={!secret || keysLoading}
+            className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+              !secret || keysLoading
+                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-500'
+            }`}
+          >
+            {keysLoading ? 'Loading...' : 'Load Secrets'}
+          </button>
+        </div>
+      </div>
+
+      {/* Secrets Table */}
+      {keys.length > 0 && (
+        <div className="rounded-lg border border-gray-800 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800 bg-gray-900/80">
+            <h2 className="text-sm font-semibold text-gray-300">{keys.length} Secret{keys.length !== 1 ? 's' : ''}</h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800 bg-gray-900/80">
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">Key</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">Value</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-400">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-800/60">
+                {keys.map((k) => (
+                  <tr key={k.key} className="hover:bg-gray-800/30">
+                    <td className="px-4 py-3 font-mono text-xs text-gray-200">{k.key}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-400 max-w-[300px]">
+                      {revealed[k.key] !== undefined ? (
+                        <span className="text-green-400 break-all">{revealed[k.key]}</span>
+                      ) : (
+                        <span className="text-gray-600">********</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        {revealed[k.key] === undefined ? (
+                          <button
+                            onClick={() => revealSecret(k.key)}
+                            className="px-2 py-1 text-xs font-medium rounded bg-gray-800 text-gray-400 border border-gray-700 hover:bg-gray-700 transition-colors"
+                          >
+                            Reveal
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => copyToClipboard(k.key, revealed[k.key])}
+                            className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
+                              copied === k.key
+                                ? 'bg-green-500/20 text-green-400 border-green-500/30'
+                                : 'bg-gray-800 text-gray-400 border-gray-700 hover:bg-gray-700'
+                            }`}
+                          >
+                            {copied === k.key ? 'Copied!' : 'Copy'}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

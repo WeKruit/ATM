@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {
+      "id": "gw-prod-1",
+      "name": "GH Worker 1 (Prod)",
+      "host": "http://34.197.248.80:8000",
+      "environment": "production",
+      "region": "us-east-1"
+    }
+  ]
+}

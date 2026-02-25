@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
 import type { KamalStatus, KamalAuditEntry } from '../api';
+import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 import LogStream from '../components/LogStream';
 import DataTable, { type Column } from '../components/DataTable';
@@ -10,9 +11,7 @@ const auditColumns: Column<KamalAuditEntry>[] = [
     key: 'timestamp',
     label: 'Timestamp',
     mono: true,
-    render: (row) => (
-      <span className="text-gray-400 text-xs">{row.timestamp || '-'}</span>
-    ),
+    render: (row) => <span className="text-gray-400 text-xs">{row.timestamp || '-'}</span>,
   },
   {
     key: 'action',
@@ -46,6 +45,7 @@ const auditColumns: Column<KamalAuditEntry>[] = [
 ];
 
 export default function KamalPage() {
+  const { activeServer } = useFleet();
   const [status, setStatus] = useState<KamalStatus | null>(null);
   const [audit, setAudit] = useState<KamalAuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,11 +53,14 @@ export default function KamalPage() {
   const [showStream, setShowStream] = useState(false);
   const [deploying, setDeploying] = useState(false);
 
+  const base = activeServer?.host ?? '';
+
   const fetchAll = useCallback(async () => {
+    if (!activeServer) return;
     try {
       const [s, a] = await Promise.all([
-        get<KamalStatus>('/kamal/status'),
-        get<KamalAuditEntry[]>('/kamal/audit').catch(() => []),
+        get<KamalStatus>('/kamal/status', base),
+        get<KamalAuditEntry[]>('/kamal/audit', base).catch(() => []),
       ]);
       setStatus(s);
       setAudit(a);
@@ -67,13 +70,18 @@ export default function KamalPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeServer, base]);
 
   useEffect(() => {
+    setLoading(true);
     fetchAll();
     const interval = setInterval(fetchAll, 15000);
     return () => clearInterval(interval);
   }, [fetchAll]);
+
+  if (!activeServer) {
+    return <div className="text-center py-20 text-gray-500">Select a server to view Kamal status.</div>;
+  }
 
   if (loading) {
     return (
@@ -124,9 +132,7 @@ export default function KamalPage() {
             )}
           </div>
           {status?.locked && status.holder && (
-            <p className="text-xs text-yellow-400/80 mt-2">
-              Held by: <span className="font-mono">{status.holder}</span>
-            </p>
+            <p className="text-xs text-yellow-400/80 mt-2">Held by: <span className="font-mono">{status.holder}</span></p>
           )}
           {status?.locked && status.reason && (
             <p className="text-xs text-gray-500 mt-1">{status.reason}</p>
@@ -146,10 +152,7 @@ export default function KamalPage() {
           <h2 className="text-sm font-semibold text-gray-300 mb-4">Deploy Actions</h2>
           <div className="flex items-center gap-4">
             <button
-              onClick={() => {
-                setDeploying(true);
-                setShowStream(true);
-              }}
+              onClick={() => { setDeploying(true); setShowStream(true); }}
               disabled={deploying || status.locked}
               className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                 deploying || status.locked
@@ -194,12 +197,9 @@ export default function KamalPage() {
         <div>
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Deploy Output</h2>
           <LogStream
-            url="/deploy/stream"
+            url={`${base}/deploy/stream`}
             active={showStream}
-            onComplete={() => {
-              setDeploying(false);
-              fetchAll();
-            }}
+            onComplete={() => { setDeploying(false); fetchAll(); }}
           />
         </div>
       )}

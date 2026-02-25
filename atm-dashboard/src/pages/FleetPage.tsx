@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
 import type { Container, Worker } from '../api';
+import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 import DataTable, { type Column } from '../components/DataTable';
 
@@ -95,16 +96,20 @@ const workerColumns: Column<Worker>[] = [
 ];
 
 export default function FleetPage() {
+  const { activeServer } = useFleet();
   const [containers, setContainers] = useState<Container[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const base = activeServer?.host ?? '';
+
   const fetchAll = useCallback(async () => {
+    if (!activeServer) return;
     try {
       const [c, w] = await Promise.all([
-        get<Container[]>('/containers'),
-        get<Worker[]>('/workers'),
+        get<Container[]>('/containers', base),
+        get<Worker[]>('/workers', base),
       ]);
       setContainers(c);
       setWorkers(w);
@@ -114,13 +119,18 @@ export default function FleetPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeServer, base]);
 
   useEffect(() => {
+    setLoading(true);
     fetchAll();
     const interval = setInterval(fetchAll, 10000);
     return () => clearInterval(interval);
   }, [fetchAll]);
+
+  if (!activeServer) {
+    return <div className="text-center py-20 text-gray-500">Select a server to view containers.</div>;
+  }
 
   const runningCount = containers.filter((c) => c.state === 'running').length;
 
@@ -129,7 +139,7 @@ export default function FleetPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-gray-100">Fleet Management</h1>
+          <h1 className="text-lg font-semibold text-gray-100">Containers & Workers</h1>
           <p className="text-sm text-gray-500 mt-0.5">
             {runningCount} running / {containers.length} total containers
           </p>

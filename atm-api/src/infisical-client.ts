@@ -103,6 +103,86 @@ export async function loadSecretsFromInfisical(): Promise<void> {
 }
 
 /**
+ * Lists all secret keys with metadata (no values) from Infisical.
+ * Returns empty array if Infisical is not configured or unavailable.
+ */
+export async function listSecretKeys(): Promise<
+  { key: string; createdAt: string; updatedAt: string }[]
+> {
+  const config = getInfisicalConfig();
+  if (!config) return [];
+
+  try {
+    const sdk: any = await import('@infisical/sdk');
+    const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
+    if (!InfisicalSDK) return [];
+
+    const client = new InfisicalSDK({ siteUrl: config.siteUrl });
+    await client.auth().universalAuth.login({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+    });
+
+    const secrets = await client.secrets().listSecrets({
+      projectId: config.projectId,
+      environment: config.environment,
+      secretPath: '/',
+    });
+
+    const secretList = secrets?.secrets || secrets || [];
+    if (!Array.isArray(secretList)) return [];
+
+    return secretList.map((s: any) => ({
+      key: s.secretKey || s.key || '',
+      createdAt: s.createdAt || s.created_at || '',
+      updatedAt: s.updatedAt || s.updated_at || '',
+    }));
+  } catch (err: any) {
+    console.warn(`[atm-api] listSecretKeys failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Gets a single secret value by key from Infisical.
+ * Throws if Infisical is not configured or the secret is not found.
+ */
+export async function getSecretValue(
+  key: string,
+): Promise<{ key: string; value: string }> {
+  const config = getInfisicalConfig();
+  if (!config) {
+    throw new Error('Infisical not configured');
+  }
+
+  const sdk: any = await import('@infisical/sdk');
+  const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
+  if (!InfisicalSDK) {
+    throw new Error('InfisicalSDK class not found');
+  }
+
+  const client = new InfisicalSDK({ siteUrl: config.siteUrl });
+  await client.auth().universalAuth.login({
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+  });
+
+  const secret = await client.secrets().getSecret({
+    secretName: key,
+    projectId: config.projectId,
+    environment: config.environment,
+    secretPath: '/',
+  });
+
+  const value = secret?.secretValue ?? secret?.value;
+  if (value === undefined) {
+    throw new Error(`Secret "${key}" not found`);
+  }
+
+  return { key, value };
+}
+
+/**
  * Returns Infisical connection status for the /secrets/status endpoint.
  */
 export async function getInfisicalStatus(): Promise<{

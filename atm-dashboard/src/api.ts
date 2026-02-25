@@ -1,13 +1,21 @@
-const BASE = '';
+// ── Generic fetch helpers ────────────────────────────────────────
 
-export async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
+export async function get<T>(path: string, base = ''): Promise<T> {
+  const res = await fetch(`${base}${path}`);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
-export async function post<T>(path: string, body: unknown, secret: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+export async function getWithAuth<T>(path: string, secret: string, base = ''): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
+    headers: { 'X-Deploy-Secret': secret },
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export async function post<T>(path: string, body: unknown, secret: string, base = ''): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -19,7 +27,34 @@ export async function post<T>(path: string, body: unknown, secret: string): Prom
   return res.json();
 }
 
-// Types for API responses
+// ── Fleet types ─────────────────────────────────────────────────
+
+export interface Server {
+  id: string;
+  name: string;
+  host: string;
+  environment: string;
+  region: string;
+}
+
+export interface FleetConfig {
+  servers: Server[];
+}
+
+// ── Secrets types ───────────────────────────────────────────────
+
+export interface SecretKey {
+  key: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecretEntry {
+  key: string;
+  value: string;
+}
+
+// ── API response types ──────────────────────────────────────────
 
 export interface HealthResponse {
   status: string;

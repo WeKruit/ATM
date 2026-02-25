@@ -107,15 +107,19 @@ function buildApiService(ecrImage: string, envVars: string[]): ServiceDefinition
 }
 
 /**
- * Builds the Worker service definition.
+ * Builds a Worker service definition.
+ *
+ * @param index - Worker index (0-based) for naming and port assignment
+ * @param port - Port for this worker (3101 + index)
  */
-function buildWorkerService(ecrImage: string, envVars: string[]): ServiceDefinition {
+function buildWorkerService(ecrImage: string, envVars: string[], index: number, port: number): ServiceDefinition {
+  const name = index === 0 ? 'ghosthands-worker' : `ghosthands-worker-${index}`;
   return {
-    name: 'ghosthands-worker',
+    name,
     config: {
       Image: ecrImage,
       Cmd: ['bun', 'packages/ghosthands/src/workers/main.ts'],
-      Env: [...envVars, 'GH_WORKER_PORT=3101', 'MAX_CONCURRENT_JOBS=1'],
+      Env: [...envVars, `GH_WORKER_PORT=${port}`, 'MAX_CONCURRENT_JOBS=1'],
       HostConfig: {
         NetworkMode: 'host',
         RestartPolicy: {
@@ -125,56 +129,25 @@ function buildWorkerService(ecrImage: string, envVars: string[]): ServiceDefinit
       Labels: {
         'gh.service': 'worker',
         'gh.managed': 'true',
+        'gh.worker.index': String(index),
       },
     },
-    healthEndpoint: 'http://localhost:3101/worker/health',
+    healthEndpoint: `http://localhost:${port}/worker/health`,
     healthTimeout: 60_000,
-    drainEndpoint: 'http://localhost:3101/worker/drain',
+    drainEndpoint: `http://localhost:${port}/worker/drain`,
     drainTimeout: 60_000,
     skipOnSelfUpdate: false,
-    startOrder: 2,
+    startOrder: 2 + index,
     stopOrder: 1,
   };
 }
 
 /**
- * Builds the Deploy Server service definition.
- */
-function buildDeployServerService(ecrImage: string, envVars: string[]): ServiceDefinition {
-  return {
-    name: 'ghosthands-deploy-server',
-    config: {
-      Image: ecrImage,
-      Cmd: ['bun', 'scripts/deploy-server.ts'],
-      Env: [...envVars, 'GH_DEPLOY_PORT=8000', 'DOCKER_CONFIG_PATH=/docker-config/config.json'],
-      HostConfig: {
-        NetworkMode: 'host',
-        Binds: [
-          '/opt/ghosthands:/opt/ghosthands:ro',
-          '/var/run/docker.sock:/var/run/docker.sock',
-          '/home/ubuntu/.docker/config.json:/docker-config/config.json:ro',
-        ],
-        RestartPolicy: {
-          Name: 'unless-stopped',
-        },
-      },
-      Labels: {
-        'gh.service': 'deploy-server',
-        'gh.managed': 'true',
-      },
-    },
-    healthEndpoint: 'http://localhost:8000/health',
-    healthTimeout: 10_000,
-    drainEndpoint: undefined,
-    drainTimeout: 0,
-    skipOnSelfUpdate: true,
-    startOrder: 3,
-    stopOrder: 2,
-  };
-}
-
-/**
- * Returns all 3 GhostHands service definitions, sorted by startOrder.
+ * Returns GhostHands service definitions (API + Workers), sorted by startOrder.
+ *
+ * NOTE: The deploy-server (ghosthands-deploy-server) has been replaced by the
+ * standalone ATM API, which runs via docker-compose (not managed by itself).
+ * Workers scale based on GH_WORKER_COUNT env var (default 1).
  */
 export function getServiceConfigs(
   imageTag: string,
@@ -182,12 +155,16 @@ export function getServiceConfigs(
 ): ServiceDefinition[] {
   const ecrImage = buildEcrImage(imageTag);
   const envVars = getEnvVarsFromProcess();
+  const workerCount = parseInt(process.env.GH_WORKER_COUNT || '1', 10);
 
   const services: ServiceDefinition[] = [
     buildApiService(ecrImage, envVars),
-    buildWorkerService(ecrImage, envVars),
-    buildDeployServerService(ecrImage, envVars),
   ];
+
+  for (let i = 0; i < workerCount; i++) {
+    const port = 3101 + i;
+    services.push(buildWorkerService(ecrImage, envVars, i, port));
+  }
 
   return services.sort((a, b) => a.startOrder - b.startOrder);
 }

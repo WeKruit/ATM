@@ -66,7 +66,7 @@ import { getEcrAuth, getEcrImageRef } from './ecr-auth';
 import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
-import { loadSecretsFromInfisical, getInfisicalStatus } from './infisical-client';
+import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue } from './infisical-client';
 import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable } from './kamal-runner';
 import { deployStream } from './deploy-stream';
 import path from 'node:path';
@@ -354,10 +354,43 @@ async function executeDeploy(imageTag: string): Promise<DeployResult | DeployFai
   }
 }
 
+// ── CORS Headers ──────────────────────────────────────────────────
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Deploy-Secret',
+};
+
+/** Wraps a Response with CORS headers */
+function withCors(response: Response): Response {
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    response.headers.set(key, value);
+  }
+  return response;
+}
+
 if (typeof Bun !== 'undefined') {
   Bun.serve({
     port: DEPLOY_PORT,
     async fetch(req) {
+      // CORS preflight
+      if (req.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+      const response = await handleRequest(req);
+      return withCors(response);
+    },
+  });
+
+  console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
+  console.log(`[atm-api] GH API: ${API_HOST}:${API_PORT}, Worker: ${WORKER_HOST}:${WORKER_PORT}`);
+  console.log(`[atm-api] Environment: ${currentEnvironment}, Deploy method: Docker API`);
+} else {
+  console.error('[atm-api] This server requires Bun runtime');
+  process.exit(1);
+}
+
+async function handleRequest(req: Request): Promise<Response> {
       const url = new URL(req.url);
 
       // ── GET /health — Unauthenticated health check ──────────
@@ -522,6 +555,36 @@ if (typeof Bun !== 'undefined') {
         return Response.json(status);
       }
 
+      // ── GET /secrets/list — List all secret keys (authenticated) ──
+      if (url.pathname === '/secrets/list' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const keys = await listSecretKeys();
+        return Response.json(keys);
+      }
+
+      // ── GET /secrets/:key — Get a single secret value (authenticated) ──
+      if (url.pathname.startsWith('/secrets/') && url.pathname !== '/secrets/status' && url.pathname !== '/secrets/list' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const secretKey = decodeURIComponent(url.pathname.slice('/secrets/'.length));
+        try {
+          const secret = await getSecretValue(secretKey);
+          return Response.json(secret);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 404 });
+        }
+      }
+
       // ── POST /deploy — Authenticated deploy trigger ─────────
       if (url.pathname === '/deploy' && req.method === 'POST') {
         if (!verifySecret(req)) {
@@ -638,6 +701,113 @@ if (typeof Bun !== 'undefined') {
           const msg = err instanceof Error ? err.message : String(err);
           return Response.json({ success: false, message: `Drain failed: ${msg}` }, { status: 500 });
         }
+      }
+
+      // ── POST /drain/graceful — Graceful drain with SSE progress ──
+      if (url.pathname === '/drain/graceful' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        let body: { timeoutMs?: number } = {};
+        try {
+          body = (await req.json()) as { timeoutMs?: number };
+        } catch {
+          // default timeout
+        }
+
+        const timeoutMs = Math.min(body.timeoutMs || 300_000, 1_800_000); // default 5min, max 30min
+
+        console.log(`[atm-api] Graceful drain requested (timeout: ${timeoutMs}ms)`);
+
+        // Discover all worker containers via Docker labels
+        const workerContainers: { name: string; port: number }[] = [];
+        try {
+          const allContainers = await listContainers(false);
+          for (const c of allContainers) {
+            const labels = (c.Labels as Record<string, string>) ?? {};
+            if (labels['gh.service'] === 'worker') {
+              const cName = ((c.Names as string[])?.[0] ?? '').replace(/^\//, '');
+              const idx = parseInt(labels['gh.worker.index'] ?? '0', 10);
+              workerContainers.push({ name: cName, port: 3101 + idx });
+            }
+          }
+        } catch {
+          workerContainers.push({ name: 'ghosthands-worker', port: WORKER_PORT });
+        }
+
+        if (workerContainers.length === 0) {
+          workerContainers.push({ name: 'ghosthands-worker', port: WORKER_PORT });
+        }
+
+        // SSE stream for drain progress
+        const encoder = new TextEncoder();
+        const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = writable.getWriter();
+
+        const sendEvent = (data: Record<string, unknown>) => {
+          writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)).catch(() => {});
+        };
+
+        // Run drain in background
+        (async () => {
+          try {
+            for (const w of workerContainers) {
+              try {
+                await fetch(`http://${WORKER_HOST}:${w.port}/worker/drain`, {
+                  method: 'POST',
+                  signal: AbortSignal.timeout(10_000),
+                });
+              } catch {
+                // Worker may not have drain endpoint
+              }
+              sendEvent({ type: 'drain', worker: w.name, status: 'draining', activeJobs: -1 });
+            }
+
+            const deadline = Date.now() + timeoutMs;
+            const drained = new Set<string>();
+
+            while (Date.now() < deadline && drained.size < workerContainers.length) {
+              for (const w of workerContainers) {
+                if (drained.has(w.name)) continue;
+                try {
+                  const status = await fetchJson(`http://${WORKER_HOST}:${w.port}/worker/status`);
+                  const activeJobs = (status?.active_jobs as number) ?? 0;
+                  sendEvent({ type: 'drain', worker: w.name, activeJobs, status: activeJobs === 0 ? 'drained' : 'draining' });
+                  if (activeJobs === 0) {
+                    drained.add(w.name);
+                  }
+                } catch {
+                  sendEvent({ type: 'drain', worker: w.name, activeJobs: 0, status: 'drained' });
+                  drained.add(w.name);
+                }
+              }
+              if (drained.size < workerContainers.length) {
+                await new Promise((r) => setTimeout(r, 2000));
+              }
+            }
+
+            const allDrained = drained.size === workerContainers.length;
+            sendEvent({ type: 'complete', allDrained });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            sendEvent({ type: 'error', message: msg });
+          } finally {
+            try { writer.close(); } catch { /* already closed */ }
+          }
+        })();
+
+        return new Response(readable, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          },
+        });
       }
 
       // ── POST /cleanup — Authenticated disk cleanup trigger ──────
@@ -980,13 +1150,4 @@ if (typeof Bun !== 'undefined') {
       }
 
       return Response.json({ error: 'not_found' }, { status: 404 });
-    },
-  });
-
-  console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
-  console.log(`[atm-api] GH API: ${API_HOST}:${API_PORT}, Worker: ${WORKER_HOST}:${WORKER_PORT}`);
-  console.log(`[atm-api] Environment: ${currentEnvironment}, Deploy method: Docker API`);
-} else {
-  console.error('[atm-api] This server requires Bun runtime');
-  process.exit(1);
 }

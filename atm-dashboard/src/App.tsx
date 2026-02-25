@@ -1,4 +1,7 @@
 import React, { useState } from 'react';
+import { FleetProvider, useFleet } from './context/FleetContext';
+import ServerSelector from './components/ServerSelector';
+import FleetOverviewPage from './pages/FleetOverviewPage';
 import OverviewPage from './pages/OverviewPage';
 import DeploysPage from './pages/DeploysPage';
 import FleetPage from './pages/FleetPage';
@@ -6,29 +9,36 @@ import MetricsPage from './pages/MetricsPage';
 import SecretsPage from './pages/SecretsPage';
 import KamalPage from './pages/KamalPage';
 
-type Tab = 'overview' | 'deploys' | 'fleet' | 'metrics' | 'secrets' | 'kamal';
+type Tab = 'overview' | 'deploys' | 'fleet-overview' | 'containers' | 'metrics' | 'secrets' | 'kamal';
 
 const tabs: { id: Tab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'deploys', label: 'Deploys' },
-  { id: 'fleet', label: 'Fleet' },
+  { id: 'fleet-overview', label: 'Fleet' },
+  { id: 'containers', label: 'Containers' },
   { id: 'metrics', label: 'Metrics' },
   { id: 'secrets', label: 'Secrets' },
   { id: 'kamal', label: 'Kamal' },
 ];
 
-const pages: Record<Tab, React.FC> = {
-  overview: OverviewPage,
-  deploys: DeploysPage,
-  fleet: FleetPage,
-  metrics: MetricsPage,
-  secrets: SecretsPage,
-  kamal: KamalPage,
-};
-
-export default function App() {
+function AppContent() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
-  const Page = pages[activeTab];
+  const { setActiveServer } = useFleet();
+
+  const handleSelectServer = (id: string) => {
+    setActiveServer(id);
+    setActiveTab('overview');
+  };
+
+  const pages: Record<Tab, React.ReactNode> = {
+    'fleet-overview': <FleetOverviewPage onSelectServer={handleSelectServer} />,
+    overview: <OverviewPage />,
+    deploys: <DeploysPage />,
+    containers: <FleetPage />,
+    metrics: <MetricsPage />,
+    secrets: <SecretsPage />,
+    kamal: <KamalPage />,
+  };
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -40,7 +50,10 @@ export default function App() {
               <span className="text-lg font-bold tracking-tight text-gray-100">ATM</span>
               <span className="text-xs text-gray-500 font-medium">WeKruit Ops</span>
             </div>
-            <span className="text-xs text-gray-600 font-mono">v1.0.0</span>
+            <div className="flex items-center gap-4">
+              <ServerSelector />
+              <span className="text-xs text-gray-600 font-mono">v1.0.0</span>
+            </div>
           </div>
         </div>
       </header>
@@ -68,8 +81,16 @@ export default function App() {
 
       {/* Page content */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <Page />
+        {pages[activeTab]}
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <FleetProvider>
+      <AppContent />
+    </FleetProvider>
   );
 }
