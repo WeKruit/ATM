@@ -904,6 +904,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /kamal/validate — Pre-deploy validation checks ────
       if (url.pathname === '/kamal/validate' && req.method === 'GET') {
+        const destination = url.searchParams.get('destination') || 'staging';
         const checks: Record<string, { ok: boolean; detail?: string }> = {};
 
         // 1. Kamal CLI available
@@ -911,7 +912,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
         // 2. Kamal config valid (validates config + SSH connectivity)
         try {
-          const configResult = await spawnKamal(['config', '-d', currentEnvironment]);
+          const configResult = await spawnKamal(['config', '-d', destination]);
           checks.config = {
             ok: configResult.exitCode === 0,
             detail: configResult.exitCode === 0 ? 'valid' : configResult.stderr.slice(0, 200),
@@ -925,7 +926,7 @@ async function handleRequest(req: Request): Promise<Response> {
         checks.infisical = { ok: infStatus.connected, detail: infStatus.error };
 
         const allOk = Object.values(checks).every((c) => c.ok);
-        return Response.json({ ready: allOk, checks }, { status: allOk ? 200 : 503 });
+        return Response.json({ ready: allOk, destination, checks }, { status: allOk ? 200 : 503 });
       }
 
       // ── GET /kamal/status — Kamal availability + lock status ──

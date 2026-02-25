@@ -1,5 +1,5 @@
 service: ghosthands
-image: 168495702277.dkr.ecr.us-east-1.amazonaws.com/ghosthands
+image: ghosthands
 
 require_destination: true
 minimum_version: 2.0.0
@@ -18,11 +18,6 @@ servers:
     options:
       network: host
     proxy: false
-    healthcheck:
-      cmd: curl -sf http://localhost:3100/health || exit 1
-      interval: 10
-      timeout: 5
-      retries: 3
   workers:
     hosts: []
     cmd: bun packages/ghosthands/src/workers/main.ts
@@ -32,11 +27,9 @@ servers:
     options:
       network: host
     proxy: false
-    healthcheck:
-      cmd: curl -sf http://localhost:3101/worker/health || exit 1
-      interval: 10
-      timeout: 5
-      retries: 3
+
+builder:
+  arch: amd64
 
 registry:
   server: 168495702277.dkr.ecr.us-east-1.amazonaws.com
