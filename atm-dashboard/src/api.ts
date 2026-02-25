@@ -37,10 +37,20 @@ export interface MetricsResponse {
   disk: { usedGb: number; totalGb: number; usagePercent: number };
 }
 
+export interface GhVersionInfo {
+  service: string;
+  environment: string;
+  commit_sha: string;
+  image_tag: string;
+  build_time: string;
+  uptime_ms: number;
+  node_env: string;
+}
+
 export interface VersionResponse {
   deployServer: string;
   version: string;
-  ghosthands: string;
+  ghosthands: GhVersionInfo | { status: string } | null;
   uptimeMs: number;
 }
 

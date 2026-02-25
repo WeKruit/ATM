@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
-import type { HealthResponse, MetricsResponse, VersionResponse } from '../api';
+import type { HealthResponse, MetricsResponse, VersionResponse, GhVersionInfo } from '../api';
 import StatusBadge from '../components/StatusBadge';
 
 function formatUptime(ms: number): string {
@@ -182,14 +182,46 @@ export default function OverviewPage() {
                 <p className="font-mono text-gray-200 mt-1">{version.version}</p>
               </div>
               <div>
-                <span className="text-gray-500 text-xs uppercase tracking-wider">Ghost-Hands</span>
-                <p className="font-mono text-gray-200 mt-1">{version.ghosthands}</p>
+                <span className="text-gray-500 text-xs uppercase tracking-wider">GH Environment</span>
+                <p className="font-mono text-gray-200 mt-1">
+                  {version.ghosthands && typeof version.ghosthands === 'object' && 'environment' in version.ghosthands
+                    ? (version.ghosthands as GhVersionInfo).environment
+                    : 'unreachable'}
+                </p>
               </div>
               <div>
                 <span className="text-gray-500 text-xs uppercase tracking-wider">Server Uptime</span>
                 <p className="font-mono text-gray-200 mt-1">{formatUptime(version.uptimeMs)}</p>
               </div>
             </div>
+            {version.ghosthands && typeof version.ghosthands === 'object' && 'commit_sha' in version.ghosthands && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mt-4 pt-4 border-t border-gray-800">
+                <div>
+                  <span className="text-gray-500 text-xs uppercase tracking-wider">Commit SHA</span>
+                  <p className="font-mono text-gray-200 mt-1 text-xs">
+                    {(version.ghosthands as GhVersionInfo).commit_sha.slice(0, 12)}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-gray-500 text-xs uppercase tracking-wider">Image Tag</span>
+                  <p className="font-mono text-gray-200 mt-1 text-xs truncate" title={(version.ghosthands as GhVersionInfo).image_tag}>
+                    {(version.ghosthands as GhVersionInfo).image_tag.slice(0, 20)}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-gray-500 text-xs uppercase tracking-wider">Build Time</span>
+                  <p className="font-mono text-gray-200 mt-1 text-xs">
+                    {new Date((version.ghosthands as GhVersionInfo).build_time).toLocaleString()}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-gray-500 text-xs uppercase tracking-wider">GH Uptime</span>
+                  <p className="font-mono text-gray-200 mt-1 text-xs">
+                    {formatUptime((version.ghosthands as GhVersionInfo).uptime_ms)}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
