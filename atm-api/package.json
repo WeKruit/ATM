@@ -7,10 +7,12 @@
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",
     "build": "bun build src/server.ts --outdir dist --target bun",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.500.0"
+    "@aws-sdk/client-secrets-manager": "^3.500.0",
+    "@infisical/sdk": "^2.3.5"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",

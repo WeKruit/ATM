@@ -13,17 +13,20 @@
  *   POST /deploy               — Rolling deploy via Docker Engine API (requires X-Deploy-Secret)
  *   POST /drain                — Triggers graceful worker drain (requires X-Deploy-Secret)
  *   POST /cleanup              — Runs disk cleanup (Docker prune + tmp + logs) (requires X-Deploy-Secret)
- *   POST /rollback             — Stub for future rollback support (requires X-Deploy-Secret)
- *   POST /admin/refresh-secrets — Re-fetch secrets from AWS Secrets Manager (requires X-Deploy-Secret)
+ *   POST /rollback             — Rollback to last successful deploy (requires X-Deploy-Secret)
+ *   POST /admin/refresh-secrets — Re-fetch secrets from Infisical/AWS SM (requires X-Deploy-Secret)
+ *   GET  /deploys              — List deploy history records (no auth)
+ *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
+ *   GET  /secrets/status       — Infisical connection status (no auth)
  *
  * Auth:
  *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
  *   GET endpoints are unauthenticated (monitoring/health checks).
  *
  * Secrets:
- *   On startup, optionally loads secrets from AWS Secrets Manager
+ *   On startup, tries Infisical first (self-hosted), falls back to AWS Secrets Manager
  *   (`ghosthands/{GH_ENVIRONMENT}`). Existing env vars (from docker-compose env_file)
- *   take precedence. AWS SM is non-fatal — if unavailable, process.env is used as-is.
+ *   take precedence. Both are non-fatal — if unavailable, process.env is used as-is.
  *
  * Usage:
  *   GH_DEPLOY_SECRET=<secret> bun atm-api/src/server.ts
@@ -54,6 +57,9 @@ import {
 } from './docker-client';
 import { getEcrAuth, getEcrImageRef } from './ecr-auth';
 import { getServiceConfigs, type ServiceDefinition } from './container-configs';
+import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
+import { executeRollback } from './rollback';
+import { loadSecretsFromInfisical, getInfisicalStatus } from './infisical-client';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
 
@@ -93,6 +99,12 @@ async function loadSecretsFromAwsSm(): Promise<void> {
 }
 
 // Load secrets before anything else reads process.env
+// Try Infisical first, fall back to AWS SM
+try {
+  await loadSecretsFromInfisical();
+} catch {
+  // Infisical failed — fall back to AWS SM
+}
 await loadSecretsFromAwsSm();
 
 const DEPLOY_PORT = parseInt(process.env.GH_DEPLOY_PORT || '8000', 10);
@@ -480,6 +492,26 @@ if (typeof Bun !== 'undefined') {
         ]);
       }
 
+      // ── GET /deploys — Deploy history records ─────────────────
+      if (url.pathname === '/deploys' && req.method === 'GET') {
+        const limit = parseInt(url.searchParams.get('limit') || '50', 10);
+        return Response.json(getRecords(limit));
+      }
+
+      // ── GET /deploys/:id — Single deploy record ───────────────
+      if (url.pathname.startsWith('/deploys/') && req.method === 'GET') {
+        const id = url.pathname.slice('/deploys/'.length);
+        const record = getRecord(id);
+        if (!record) return Response.json({ error: 'Deploy record not found' }, { status: 404 });
+        return Response.json(record);
+      }
+
+      // ── GET /secrets/status — Infisical connection status ──────
+      if (url.pathname === '/secrets/status' && req.method === 'GET') {
+        const status = await getInfisicalStatus();
+        return Response.json(status);
+      }
+
       // ── POST /deploy — Authenticated deploy trigger ─────────
       if (url.pathname === '/deploy' && req.method === 'POST') {
         if (!verifySecret(req)) {
@@ -526,11 +558,19 @@ if (typeof Bun !== 'undefined') {
           step: 'initializing',
         };
 
+        // Record deploy in history
+        const deployRecord = createDeployRecord(imageTag, 'ci');
+
         try {
           const result = await executeDeploy(imageTag);
           currentDeploy = null;
 
           if (result.success) {
+            updateRecord(deployRecord.id, {
+              status: 'completed',
+              completedAt: new Date().toISOString(),
+              durationMs: result.duration,
+            });
             console.log(`[atm-api] Deploy succeeded: ${imageTag} (${result.duration}ms)`);
             return Response.json({
               success: true,
@@ -539,6 +579,11 @@ if (typeof Bun !== 'undefined') {
               imageTag: result.imageTag,
             });
           } else {
+            updateRecord(deployRecord.id, {
+              status: 'failed',
+              completedAt: new Date().toISOString(),
+              error: result.error,
+            });
             console.error(`[atm-api] Deploy failed: ${imageTag} — ${result.error}`);
             return Response.json(
               {
@@ -553,6 +598,11 @@ if (typeof Bun !== 'undefined') {
         } catch (err) {
           currentDeploy = null;
           const msg = err instanceof Error ? err.message : String(err);
+          updateRecord(deployRecord.id, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+            error: msg,
+          });
           console.error(`[atm-api] Deploy error: ${msg}`);
           return Response.json(
             { success: false, error: `Deploy error: ${msg}` },
@@ -616,7 +666,7 @@ if (typeof Bun !== 'undefined') {
         }
       }
 
-      // ── POST /rollback — Stub for future rollback support ──────
+      // ── POST /rollback — Rollback to last successful deploy ──────
       if (url.pathname === '/rollback' && req.method === 'POST') {
         if (!verifySecret(req)) {
           return Response.json(
@@ -625,14 +675,16 @@ if (typeof Bun !== 'undefined') {
           );
         }
 
-        // v1: rollback not yet implemented — report error
-        return Response.json(
-          { success: false, message: 'Rollback not yet implemented. Redeploy with a previous image tag.' },
-          { status: 501 },
-        );
+        console.log('[atm-api] Rollback requested');
+        const rollbackResult = await executeRollback(executeDeploy);
+        if (rollbackResult.success) {
+          return Response.json(rollbackResult);
+        } else {
+          return Response.json(rollbackResult, { status: 400 });
+        }
       }
 
-      // ── POST /admin/refresh-secrets — Re-fetch secrets from AWS SM ──
+      // ── POST /admin/refresh-secrets — Re-fetch secrets from Infisical/AWS SM ──
       if (url.pathname === '/admin/refresh-secrets' && req.method === 'POST') {
         if (!verifySecret(req)) {
           return Response.json(
@@ -641,10 +693,16 @@ if (typeof Bun !== 'undefined') {
           );
         }
 
-        console.log('[atm-api] Refreshing secrets from AWS Secrets Manager...');
+        console.log('[atm-api] Refreshing secrets...');
         try {
+          // Try Infisical first, fall back to AWS SM
+          try {
+            await loadSecretsFromInfisical();
+          } catch {
+            // Infisical failed — fall back
+          }
           await loadSecretsFromAwsSm();
-          return Response.json({ success: true, message: 'Secrets refreshed from AWS SM' });
+          return Response.json({ success: true, message: 'Secrets refreshed' });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return Response.json(
