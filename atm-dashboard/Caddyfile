@@ -1,0 +1,50 @@
+:8080 {
+	# API reverse proxy — proxy all API paths to the EC2 ATM backend
+	handle /health {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /metrics {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /version {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /containers {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /workers {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /deploys* {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /deploy* {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /secrets* {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /kamal* {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /rollback* {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /drain {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /cleanup {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+	handle /admin* {
+		reverse_proxy {$ATM_API_URL:http://localhost:8000}
+	}
+
+	# SPA static files — serve built dashboard assets
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+		encode gzip
+	}
+}

@@ -1,0 +1,25 @@
+# ATM Dashboard on Fly.io
+# Serves the React SPA and proxies API requests to the EC2 ATM backend.
+#
+# Required secrets:
+#   fly secrets set ATM_API_URL=http://<ec2-ip>:8000
+#
+# Deploy:
+#   cd atm-dashboard && fly deploy
+
+app = "atm-wekruit"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
