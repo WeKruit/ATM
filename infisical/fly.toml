@@ -1,0 +1,19 @@
+# Infisical on Fly.io
+# TODO (WEK-202): Configure Fly.io deployment
+
+app = "infisical-wekruit"
+primary_region = "iad"
+
+[build]
+  image = "infisical/infisical:latest"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"

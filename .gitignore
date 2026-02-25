@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.log
+*.tgz
+.DS_Store
+deploy-history.json

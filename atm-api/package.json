@@ -1,0 +1,19 @@
+{
+  "name": "@wekruit/atm-api",
+  "version": "1.0.0",
+  "description": "ATM (Automation & Tooling Manager) — centralized ops API for WeKruit infrastructure",
+  "private": true,
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "build": "bun build src/server.ts --outdir dist --target bun",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.500.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.4.0"
+  }
+}

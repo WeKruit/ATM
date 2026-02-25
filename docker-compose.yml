@@ -1,0 +1,25 @@
+# ATM API service definition for EC2
+# Runs alongside GhostHands containers on the same host
+
+services:
+  atm-api:
+    build:
+      context: ./atm-api
+      dockerfile: Dockerfile
+    image: atm-api:latest
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - GH_DEPLOY_PORT=8000
+      - GH_API_HOST=localhost
+      - GH_WORKER_HOST=localhost
+      - DOCKER_CONFIG_PATH=/docker-config/config.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/ubuntu/.docker/config.json:/docker-config/config.json:ro
+      - /opt/ghosthands:/opt/ghosthands:ro
+    restart: unless-stopped
+    labels:
+      atm.service: "api"
+      atm.managed: "true"
