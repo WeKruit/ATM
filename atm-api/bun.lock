@@ -6,6 +6,7 @@
       "name": "@wekruit/atm-api",
       "dependencies": {
         "@aws-sdk/client-secrets-manager": "^3.500.0",
+        "@infisical/sdk": "^2.3.5",
       },
       "devDependencies": {
         "@types/bun": "^1.1.0",
@@ -69,6 +70,32 @@
     "@aws-sdk/xml-builder": ["@aws-sdk/xml-builder@3.972.6", "", { "dependencies": { "@smithy/types": "^4.12.1", "fast-xml-parser": "5.3.6", "tslib": "^2.6.2" } }, "sha512-YrXu+UnfC8IdARa4ZkrpcyuRmA/TVgYW6Lcdtvi34NQgRjM1hTirNirN+rGb+s/kNomby8oJiIAu0KNbiZC7PA=="],
 
     "@aws/lambda-invoke-store": ["@aws/lambda-invoke-store@0.2.3", "", {}, "sha512-oLvsaPMTBejkkmHhjf09xTgk71mOqyr/409NKhRIL08If7AhVfUsJhVsx386uJaqNd42v9kWamQ9lFbkoC2dYw=="],
+
+    "@infisical/sdk": ["@infisical/sdk@2.3.5", "", { "optionalDependencies": { "@infisical/sdk-android-arm-eabi": "2.3.5", "@infisical/sdk-android-arm64": "2.3.5", "@infisical/sdk-darwin-arm64": "2.3.5", "@infisical/sdk-darwin-x64": "2.3.5", "@infisical/sdk-linux-arm-gnueabihf": "2.3.5", "@infisical/sdk-linux-arm64-gnu": "2.3.5", "@infisical/sdk-linux-arm64-musl": "2.3.5", "@infisical/sdk-linux-x64-gnu": "2.3.5", "@infisical/sdk-linux-x64-musl": "2.3.5", "@infisical/sdk-win32-arm64-msvc": "2.3.5", "@infisical/sdk-win32-ia32-msvc": "2.3.5", "@infisical/sdk-win32-x64-msvc": "2.3.5" } }, "sha512-vaQmDyzOFRkiZqstifk2dHTctkfizhlv7/+Ds6PFVWPGUpRUqP4PoR4yRdx2405IKWVx/ABuqQ4S8e9ix1kwzg=="],
+
+    "@infisical/sdk-android-arm-eabi": ["@infisical/sdk-android-arm-eabi@2.3.5", "", { "os": "android", "cpu": "arm" }, "sha512-7KGWJ5X/RV6sIHWt3mjNg+zykzYvbHIKmNKBHTTAOuULKpTIAoQyFD1q3XMylP2AaVh8BJtgVOODO4/Uxexlug=="],
+
+    "@infisical/sdk-android-arm64": ["@infisical/sdk-android-arm64@2.3.5", "", { "os": "android", "cpu": "arm64" }, "sha512-jHCvwYYchtTWryAGX2MvddRVZFdGrdoakGTMrvPQ0ZyM1XnLo3Q9tb35RCjTTylE1q114OKGRymM2JZ10ygiRw=="],
+
+    "@infisical/sdk-darwin-arm64": ["@infisical/sdk-darwin-arm64@2.3.5", "", { "os": "darwin", "cpu": "arm64" }, "sha512-UEe38OTxjlOMo2HVplmT6pmXwks0c9lckKDUKK/MNfp0H9n4RJKXd8jco1BeG713eNR7bX01Q2c74XgLJhf58Q=="],
+
+    "@infisical/sdk-darwin-x64": ["@infisical/sdk-darwin-x64@2.3.5", "", { "os": "darwin", "cpu": "x64" }, "sha512-mMz/1N+aZjvIXPHMnfl9DmyYWCXjRsa/Uxj94pXjJGZ3GMsANRTR08GVRI2S2XWMODiV5D9zY2mQ3/eY5E5Y/A=="],
+
+    "@infisical/sdk-linux-arm-gnueabihf": ["@infisical/sdk-linux-arm-gnueabihf@2.3.5", "", { "os": "linux", "cpu": "arm" }, "sha512-GjVQNdv8aYn+mZgW/sRFirwb0iMRX7ShBC0N8MsgrSBxnSpH2nFiUFj8hFi2DOvR5NbJ+KQpabfvP0eodozKSg=="],
+
+    "@infisical/sdk-linux-arm64-gnu": ["@infisical/sdk-linux-arm64-gnu@2.3.5", "", { "os": "linux", "cpu": "arm64" }, "sha512-hclvvD1eAYB6JP58mo5TfBjE+vSGSv30fNuXeaheO4yOLfnaGyCCR6E6F96uxNNCAVkVO4RXRhiSSCT6K3f3jA=="],
+
+    "@infisical/sdk-linux-arm64-musl": ["@infisical/sdk-linux-arm64-musl@2.3.5", "", { "os": "linux", "cpu": "arm64" }, "sha512-RFYd49eXoUtXXUsQb9Cqiu0RKp32GrsEATj9GlMJYharDn8BZhYr6lpDb+7EZolbjg+A40JvT98nqN2EliUwgA=="],
+
+    "@infisical/sdk-linux-x64-gnu": ["@infisical/sdk-linux-x64-gnu@2.3.5", "", { "os": "linux", "cpu": "x64" }, "sha512-E0JB4fowk9cmfQGBJw8QNXy9TBewB42kyQhCYARQtPvleXqoK48DUs7mzRIawLUbyCA5ldcy2jFbj/ZXWWYNOA=="],
+
+    "@infisical/sdk-linux-x64-musl": ["@infisical/sdk-linux-x64-musl@2.3.5", "", { "os": "linux", "cpu": "x64" }, "sha512-3+irZY69oepYAwXXgTUDIW6PbjLRmj79rzA4CSKfF3a0wBLlR+6e+1NT+nu87BtP3wSBej3y1JAnfw853AekDA=="],
+
+    "@infisical/sdk-win32-arm64-msvc": ["@infisical/sdk-win32-arm64-msvc@2.3.5", "", { "os": "win32", "cpu": "arm64" }, "sha512-DVZMglFSE3Xqj7/Bsv/4KfhfAO970BsSdOL3LrlRvcN3Dkocuthh3rHw6U5jg92FfMw+hMN9DzlhTqtUBZWYjQ=="],
+
+    "@infisical/sdk-win32-ia32-msvc": ["@infisical/sdk-win32-ia32-msvc@2.3.5", "", { "os": "win32", "cpu": "ia32" }, "sha512-dw3XuR2myJ2leB3+KStFsHB2zIJ29TArvoU/zGw/cdCOj1dRKF7WcahWg1id+ydwoeOv+HVZ+RsS8sZR5gYblQ=="],
+
+    "@infisical/sdk-win32-x64-msvc": ["@infisical/sdk-win32-x64-msvc@2.3.5", "", { "os": "win32", "cpu": "x64" }, "sha512-SWzYndKhHih4zE/OYWfv9QoYaj5oDBhNSKZAlw1XFYdlUU41nTCN1nruD9RRdmjoJ/pF0sn2Mr9v+OiXStnC+A=="],
 
     "@smithy/abort-controller": ["@smithy/abort-controller@4.2.10", "", { "dependencies": { "@smithy/types": "^4.13.0", "tslib": "^2.6.2" } }, "sha512-qocxM/X4XGATqQtUkbE9SPUB6wekBi+FyJOMbPj0AhvyvFGYEmOlz6VB22iMePCQsFmMIvFSeViDvA7mZJG47g=="],
 
