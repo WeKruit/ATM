@@ -1,0 +1,9 @@
+servers:
+  web:
+    hosts: []
+  workers:
+    hosts: []
+
+env:
+  clear:
+    GH_ENVIRONMENT: production

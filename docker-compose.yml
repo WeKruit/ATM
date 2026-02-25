@@ -16,6 +16,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ubuntu/.docker/config.json:/docker-config/config.json:ro
       - /opt/ghosthands:/opt/ghosthands:ro
+      # Kamal SSH key
+      - /home/ubuntu/.ssh/gh-deploy-key:/root/.ssh/gh-deploy-key:ro
+      # Kamal config + secrets
+      - ./config:/app/config:ro
+      - ./.kamal:/app/.kamal:ro
     restart: unless-stopped
     labels:
       atm.service: "api"

@@ -19,6 +19,7 @@
  *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
  *   GET  /secrets/status       — Infisical connection status (no auth)
  *   GET  /deploy/stream        — SSE stream for real-time deploy logs (no auth)
+ *   GET  /kamal/validate       — Pre-deploy validation checks (no auth)
  *   GET  /kamal/status         — Kamal availability + lock status (no auth)
  *   GET  /kamal/audit          — Kamal audit log (no auth)
  *   POST /deploy/kamal         — Trigger Kamal deploy (requires X-Deploy-Secret)
@@ -67,7 +68,7 @@ import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
 import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue } from './infisical-client';
-import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable } from './kamal-runner';
+import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal } from './kamal-runner';
 import { deployStream } from './deploy-stream';
 import path from 'node:path';
 
@@ -899,6 +900,32 @@ async function handleRequest(req: Request): Promise<Response> {
       // ── GET /deploy/stream — SSE deploy log stream ──────────
       if (url.pathname === '/deploy/stream' && req.method === 'GET') {
         return deployStream.createStream();
+      }
+
+      // ── GET /kamal/validate — Pre-deploy validation checks ────
+      if (url.pathname === '/kamal/validate' && req.method === 'GET') {
+        const checks: Record<string, { ok: boolean; detail?: string }> = {};
+
+        // 1. Kamal CLI available
+        checks.kamal = { ok: await isKamalAvailable() };
+
+        // 2. Kamal config valid (validates config + SSH connectivity)
+        try {
+          const configResult = await spawnKamal(['config', '-d', currentEnvironment]);
+          checks.config = {
+            ok: configResult.exitCode === 0,
+            detail: configResult.exitCode === 0 ? 'valid' : configResult.stderr.slice(0, 200),
+          };
+        } catch (e: any) {
+          checks.config = { ok: false, detail: e.message };
+        }
+
+        // 3. Infisical connection
+        const infStatus = await getInfisicalStatus();
+        checks.infisical = { ok: infStatus.connected, detail: infStatus.error };
+
+        const allOk = Object.values(checks).every((c) => c.ok);
+        return Response.json({ ready: allOk, checks }, { status: allOk ? 200 : 503 });
       }
 
       // ── GET /kamal/status — Kamal availability + lock status ──

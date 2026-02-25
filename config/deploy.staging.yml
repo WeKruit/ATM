@@ -1,0 +1,11 @@
+servers:
+  web:
+    hosts:
+      - 44.223.180.11
+  workers:
+    hosts:
+      - 44.223.180.11
+
+env:
+  clear:
+    GH_ENVIRONMENT: staging
