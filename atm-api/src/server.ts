@@ -5,11 +5,11 @@
  * to trigger deploys and check health on each EC2 sandbox.
  *
  * Endpoints:
- *   GET  /health      — Returns worker health + active task count (no auth)
- *   GET  /metrics     — Returns system-level CPU/memory/disk stats (no auth)
- *   GET  /version     — Returns deploy server version + current image info
- *   GET  /containers  — Returns running Docker containers (no auth)
- *   GET  /workers     — Returns worker registry status (no auth)
+ *   GET  /health               — Returns worker health + active task count (no auth)
+ *   GET  /metrics              — Returns system-level CPU/memory/disk stats (no auth)
+ *   GET  /version              — Returns deploy server version + current image info
+ *   GET  /containers           — Returns running Docker containers (no auth)
+ *   GET  /workers              — Returns worker registry status (no auth)
  *   POST /deploy               — Rolling deploy via Docker Engine API (requires X-Deploy-Secret)
  *   POST /drain                — Triggers graceful worker drain (requires X-Deploy-Secret)
  *   POST /cleanup              — Runs disk cleanup (Docker prune + tmp + logs) (requires X-Deploy-Secret)
@@ -18,6 +18,13 @@
  *   GET  /deploys              — List deploy history records (no auth)
  *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
  *   GET  /secrets/status       — Infisical connection status (no auth)
+ *   GET  /deploy/stream        — SSE stream for real-time deploy logs (no auth)
+ *   GET  /kamal/status         — Kamal availability + lock status (no auth)
+ *   GET  /kamal/audit          — Kamal audit log (no auth)
+ *   POST /deploy/kamal         — Trigger Kamal deploy (requires X-Deploy-Secret)
+ *   POST /rollback/kamal       — Trigger Kamal rollback (requires X-Deploy-Secret)
+ *   GET  /dashboard            — Serve dashboard SPA (no auth)
+ *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
  * Auth:
  *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
@@ -60,6 +67,9 @@ import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
 import { loadSecretsFromInfisical, getInfisicalStatus } from './infisical-client';
+import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable } from './kamal-runner';
+import { deployStream } from './deploy-stream';
+import path from 'node:path';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
 
@@ -710,6 +720,263 @@ if (typeof Bun !== 'undefined') {
             { status: 500 },
           );
         }
+      }
+
+      // ── GET /deploy/stream — SSE deploy log stream ──────────
+      if (url.pathname === '/deploy/stream' && req.method === 'GET') {
+        return deployStream.createStream();
+      }
+
+      // ── GET /kamal/status — Kamal availability + lock status ──
+      if (url.pathname === '/kamal/status' && req.method === 'GET') {
+        const available = await isKamalAvailable();
+        if (!available) {
+          return Response.json({ available: false });
+        }
+        const lock = await kamalLockStatus(currentEnvironment);
+        return Response.json({
+          available: true,
+          locked: lock.locked,
+          ...(lock.holder ? { holder: lock.holder } : {}),
+          ...(lock.reason ? { reason: lock.reason } : {}),
+        });
+      }
+
+      // ── GET /kamal/audit — Kamal audit log ────────────────────
+      if (url.pathname === '/kamal/audit' && req.method === 'GET') {
+        try {
+          const entries = await kamalAudit(currentEnvironment);
+          return Response.json(entries);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: `Audit failed: ${msg}` }, { status: 500 });
+        }
+      }
+
+      // ── POST /deploy/kamal — Kamal deploy trigger ─────────────
+      if (url.pathname === '/deploy/kamal' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        if (currentDeploy) {
+          return Response.json(
+            {
+              success: false,
+              message: `Deploy already in progress: ${currentDeploy.imageTag} (started ${Math.round((Date.now() - currentDeploy.startedAt) / 1000)}s ago)`,
+            },
+            { status: 409 },
+          );
+        }
+
+        let body: { destination?: string; version?: string } = {};
+        try {
+          body = (await req.json()) as { destination?: string; version?: string };
+        } catch {
+          return Response.json(
+            { success: false, message: 'Invalid JSON body' },
+            { status: 400 },
+          );
+        }
+
+        const destination = body.destination || currentEnvironment;
+        const version = body.version;
+        const imageTag = version || 'latest';
+
+        console.log(`[atm-api] Kamal deploy requested: destination=${destination}, version=${version ?? 'latest'}`);
+
+        currentDeploy = {
+          imageTag,
+          startedAt: Date.now(),
+          step: 'kamal-deploy',
+        };
+
+        const deployRecord = createDeployRecord(imageTag, 'kamal');
+
+        try {
+          const result = await kamalDeploy(destination, version, (line) => {
+            deployStream.broadcastLine(line);
+          });
+
+          currentDeploy = null;
+
+          if (result.exitCode === 0) {
+            updateRecord(deployRecord.id, {
+              status: 'completed',
+              completedAt: new Date().toISOString(),
+              durationMs: result.durationMs,
+            });
+            deployStream.broadcastComplete(true);
+            console.log(`[atm-api] Kamal deploy succeeded (${result.durationMs}ms)`);
+            return Response.json({
+              success: true,
+              message: `Kamal deploy successful`,
+              duration: result.durationMs,
+              imageTag,
+            });
+          } else {
+            const error = result.stderr || `Kamal exited with code ${result.exitCode}`;
+            updateRecord(deployRecord.id, {
+              status: 'failed',
+              completedAt: new Date().toISOString(),
+              error,
+            });
+            deployStream.broadcastComplete(false, error);
+            console.error(`[atm-api] Kamal deploy failed: ${error}`);
+            return Response.json(
+              { success: false, error },
+              { status: 500 },
+            );
+          }
+        } catch (err) {
+          currentDeploy = null;
+          const msg = err instanceof Error ? err.message : String(err);
+          updateRecord(deployRecord.id, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+            error: msg,
+          });
+          deployStream.broadcastComplete(false, msg);
+          console.error(`[atm-api] Kamal deploy error: ${msg}`);
+          return Response.json(
+            { success: false, error: `Kamal deploy error: ${msg}` },
+            { status: 500 },
+          );
+        }
+      }
+
+      // ── POST /rollback/kamal — Kamal rollback trigger ──────────
+      if (url.pathname === '/rollback/kamal' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        let body: { destination?: string; version: string } = { version: '' };
+        try {
+          body = (await req.json()) as { destination?: string; version: string };
+        } catch {
+          return Response.json(
+            { success: false, message: 'Invalid JSON body' },
+            { status: 400 },
+          );
+        }
+
+        if (!body.version) {
+          return Response.json(
+            { success: false, message: 'version is required' },
+            { status: 400 },
+          );
+        }
+
+        const destination = body.destination || currentEnvironment;
+        const { version } = body;
+
+        console.log(`[atm-api] Kamal rollback requested: destination=${destination}, version=${version}`);
+
+        const deployRecord = createDeployRecord(version, 'rollback');
+
+        try {
+          const result = await kamalRollback(destination, version, (line) => {
+            deployStream.broadcastLine(line);
+          });
+
+          if (result.exitCode === 0) {
+            updateRecord(deployRecord.id, {
+              status: 'completed',
+              completedAt: new Date().toISOString(),
+              durationMs: result.durationMs,
+            });
+            deployStream.broadcastComplete(true);
+            console.log(`[atm-api] Kamal rollback succeeded to ${version} (${result.durationMs}ms)`);
+            return Response.json({
+              success: true,
+              message: `Rolled back to ${version}`,
+              duration: result.durationMs,
+              version,
+            });
+          } else {
+            const error = result.stderr || `Kamal rollback exited with code ${result.exitCode}`;
+            updateRecord(deployRecord.id, {
+              status: 'failed',
+              completedAt: new Date().toISOString(),
+              error,
+            });
+            deployStream.broadcastComplete(false, error);
+            console.error(`[atm-api] Kamal rollback failed: ${error}`);
+            return Response.json(
+              { success: false, error },
+              { status: 500 },
+            );
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          updateRecord(deployRecord.id, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+            error: msg,
+          });
+          deployStream.broadcastComplete(false, msg);
+          console.error(`[atm-api] Kamal rollback error: ${msg}`);
+          return Response.json(
+            { success: false, error: `Kamal rollback error: ${msg}` },
+            { status: 500 },
+          );
+        }
+      }
+
+      // ── GET /dashboard — Serve static dashboard SPA ────────────
+      if (url.pathname === '/dashboard' || url.pathname.startsWith('/dashboard/')) {
+        const dashboardDist = path.resolve(import.meta.dir, '../../atm-dashboard/dist');
+
+        // Content-Type map for static assets
+        const contentTypes: Record<string, string> = {
+          '.html': 'text/html',
+          '.js': 'application/javascript',
+          '.css': 'text/css',
+          '.json': 'application/json',
+          '.svg': 'image/svg+xml',
+          '.png': 'image/png',
+          '.ico': 'image/x-icon',
+          '.woff': 'font/woff',
+          '.woff2': 'font/woff2',
+        };
+
+        // Strip /dashboard prefix to get the file path
+        let filePath = url.pathname === '/dashboard'
+          ? '/index.html'
+          : url.pathname.slice('/dashboard'.length);
+
+        if (filePath === '' || filePath === '/') {
+          filePath = '/index.html';
+        }
+
+        const fullPath = path.join(dashboardDist, filePath);
+        const file = Bun.file(fullPath);
+
+        if (await file.exists()) {
+          const ext = path.extname(fullPath);
+          const contentType = contentTypes[ext] || 'application/octet-stream';
+          return new Response(file, {
+            headers: { 'Content-Type': contentType },
+          });
+        }
+
+        // SPA fallback: serve index.html for unmatched routes
+        const indexPath = path.join(dashboardDist, 'index.html');
+        const indexFile = Bun.file(indexPath);
+        if (await indexFile.exists()) {
+          return new Response(indexFile, {
+            headers: { 'Content-Type': 'text/html' },
+          });
+        }
+
+        return Response.json({ error: 'Dashboard not built' }, { status: 404 });
       }
 
       return Response.json({ error: 'not_found' }, { status: 404 });
