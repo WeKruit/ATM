@@ -556,6 +556,7 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       // ── GET /secrets/list — List all secret keys (authenticated) ──
+      // Optional query param: ?path=/valet (default: /)
       if (url.pathname === '/secrets/list' && req.method === 'GET') {
         if (!verifySecret(req)) {
           return Response.json(
@@ -563,11 +564,13 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 401 },
           );
         }
-        const keys = await listSecretKeys();
+        const secretPath = url.searchParams.get('path') || '/';
+        const keys = await listSecretKeys(secretPath);
         return Response.json(keys);
       }
 
       // ── GET /secrets/:key — Get a single secret value (authenticated) ──
+      // Optional query param: ?path=/valet (default: /)
       if (url.pathname.startsWith('/secrets/') && url.pathname !== '/secrets/status' && url.pathname !== '/secrets/list' && req.method === 'GET') {
         if (!verifySecret(req)) {
           return Response.json(
@@ -576,8 +579,9 @@ async function handleRequest(req: Request): Promise<Response> {
           );
         }
         const secretKey = decodeURIComponent(url.pathname.slice('/secrets/'.length));
+        const secretPath = url.searchParams.get('path') || '/';
         try {
-          const secret = await getSecretValue(secretKey);
+          const secret = await getSecretValue(secretKey, secretPath);
           return Response.json(secret);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

@@ -1,11 +1,26 @@
 {
   "servers": [
     {
-      "id": "gw-prod-1",
-      "name": "GH Worker 1 (Prod)",
-      "host": "http://34.197.248.80:8000",
+      "id": "atm-gw1",
+      "name": "ATM Server",
+      "host": "https://atm-gw1.wekruit.com",
       "environment": "production",
-      "region": "us-east-1"
+      "region": "us-east-1",
+      "instanceId": "i-0b369c07ccf903b92",
+      "ip": "34.195.147.149",
+      "type": "t3.large",
+      "role": "atm"
+    },
+    {
+      "id": "gh-worker-1",
+      "name": "GH Worker 1",
+      "host": "http://44.223.180.11:8000",
+      "environment": "staging",
+      "region": "us-east-1",
+      "instanceId": "i-0baf28dd8bb630810",
+      "ip": "44.223.180.11",
+      "type": "t3.large",
+      "role": "ghosthands"
     }
   ]
 }

@@ -5,6 +5,9 @@ import type { SecretsStatus, SecretKey, SecretEntry } from '../api';
 import StatusBadge from '../components/StatusBadge';
 import { useFleet } from '../context/FleetContext';
 
+const SECRET_PATHS = ['/', '/valet', '/ghosthands', '/atm'] as const;
+const INFISICAL_URL = 'https://infisical-wekruit.fly.dev';
+
 export default function SecretsPage() {
   const { activeServer } = useFleet();
   const base = activeServer?.host || '';
@@ -17,6 +20,7 @@ export default function SecretsPage() {
   const [keysLoading, setKeysLoading] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [copied, setCopied] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string>('/');
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -45,7 +49,8 @@ export default function SecretsPage() {
     if (!secret) return;
     setKeysLoading(true);
     try {
-      const data = await getWithAuth<SecretKey[]>('/secrets/list', secret, base);
+      const pathParam = selectedPath !== '/' ? `?path=${encodeURIComponent(selectedPath)}` : '';
+      const data = await getWithAuth<SecretKey[]>(`/secrets/list${pathParam}`, secret, base);
       setKeys(data);
       setRevealed({});
     } catch (err) {
@@ -55,10 +60,19 @@ export default function SecretsPage() {
     }
   };
 
+  // Reload secrets when path changes (if already authenticated)
+  useEffect(() => {
+    if (secret && keys.length > 0) {
+      loadKeys();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPath]);
+
   const revealSecret = async (key: string) => {
     if (!secret) return;
     try {
-      const data = await getWithAuth<SecretEntry>(`/secrets/${encodeURIComponent(key)}`, secret, base);
+      const pathParam = selectedPath !== '/' ? `?path=${encodeURIComponent(selectedPath)}` : '';
+      const data = await getWithAuth<SecretEntry>(`/secrets/${encodeURIComponent(key)}${pathParam}`, secret, base);
       setRevealed((prev) => ({ ...prev, [key]: data.value }));
     } catch (err) {
       setError(err instanceof Error ? err.message : `Failed to reveal ${key}`);
@@ -88,12 +102,25 @@ export default function SecretsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-gray-100">Secrets Management</h1>
-        <button
-          onClick={fetchStatus}
-          className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-gray-400 border border-gray-700 hover:bg-gray-700 transition-colors"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <a
+            href={INFISICAL_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-blue-400 border border-gray-700 hover:bg-gray-700 hover:text-blue-300 transition-colors flex items-center gap-1.5"
+          >
+            Manage in Infisical
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+          </a>
+          <button
+            onClick={fetchStatus}
+            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-gray-400 border border-gray-700 hover:bg-gray-700 transition-colors"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -102,7 +129,7 @@ export default function SecretsPage() {
         </div>
       )}
 
-      {/* Auth Section */}
+      {/* Auth + Path Filter Section */}
       <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
         <h2 className="text-sm font-semibold text-gray-300 mb-3">Authentication</h2>
         <div className="flex items-center gap-3">
@@ -113,6 +140,17 @@ export default function SecretsPage() {
             placeholder="Deploy secret (X-Deploy-Secret)"
             className="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600"
           />
+          <select
+            value={selectedPath}
+            onChange={(e) => setSelectedPath(e.target.value)}
+            className="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          >
+            {SECRET_PATHS.map((p) => (
+              <option key={p} value={p}>
+                {p === '/' ? 'Root (/)' : p}
+              </option>
+            ))}
+          </select>
           <button
             onClick={loadKeys}
             disabled={!secret || keysLoading}
@@ -130,8 +168,11 @@ export default function SecretsPage() {
       {/* Secrets Table */}
       {keys.length > 0 && (
         <div className="rounded-lg border border-gray-800 overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-800 bg-gray-900/80">
-            <h2 className="text-sm font-semibold text-gray-300">{keys.length} Secret{keys.length !== 1 ? 's' : ''}</h2>
+          <div className="px-4 py-3 border-b border-gray-800 bg-gray-900/80 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-gray-300">
+              {keys.length} Secret{keys.length !== 1 ? 's' : ''}{' '}
+              <span className="text-gray-500 font-normal">in {selectedPath === '/' ? 'root' : selectedPath}</span>
+            </h2>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -198,7 +239,7 @@ export default function SecretsPage() {
                 <InfoItem label="Project ID" value={status.projectId || '-'} mono />
                 <InfoItem label="Environment" value={status.environment || '-'} />
                 <InfoItem
-                  label="Secrets Loaded"
+                  label="Total Secrets"
                   value={
                     <span className="text-2xl font-bold tabular-nums text-green-400">
                       {status.secretCount ?? 0}
@@ -207,10 +248,22 @@ export default function SecretsPage() {
                 />
               </div>
 
+              {/* Per-path secret counts */}
+              {status.paths && Object.keys(status.paths).length > 0 && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {Object.entries(status.paths).map(([p, count]) => (
+                    <div key={p} className="rounded-lg border border-gray-800 bg-gray-900/80 px-3 py-2">
+                      <span className="text-gray-500 text-xs font-mono">{p}</span>
+                      <p className="text-lg font-bold tabular-nums text-gray-200 mt-0.5">{count}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="rounded-lg bg-green-500/5 border border-green-500/20 p-4">
                 <p className="text-sm text-green-400/80">
                   Infisical is connected and managing secrets for this environment.
-                  Secrets are loaded at server startup and can be refreshed via the admin endpoint.
+                  Secrets are organized under /valet, /ghosthands, and /atm paths.
                 </p>
               </div>
             </div>

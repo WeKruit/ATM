@@ -129,6 +129,7 @@ export interface SecretsStatus {
   projectId?: string;
   environment?: string;
   secretCount?: number;
+  paths?: Record<string, number>;
   error?: string;
 }
 

@@ -1,0 +1,57 @@
+name: CI — ATM
+
+on:
+    workflow_call: {}
+    push:
+        branches: [main, staging]
+    pull_request:
+        branches: [main]
+
+jobs:
+    atm-api:
+        name: ATM API — typecheck + test
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+              working-directory: atm-api
+
+            - name: Type check
+              run: bun run typecheck
+              working-directory: atm-api
+
+            - name: Tests
+              run: bun test
+              working-directory: atm-api
+
+    atm-dashboard:
+        name: ATM Dashboard — typecheck + build
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Install dependencies
+              run: bun install --frozen-lockfile
+              working-directory: atm-dashboard
+
+            - name: Type check
+              run: bunx tsc --noEmit
+              working-directory: atm-dashboard
+
+            - name: Build
+              run: bunx vite build
+              working-directory: atm-dashboard

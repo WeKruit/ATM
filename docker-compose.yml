@@ -1,5 +1,5 @@
 # ATM API service definition for EC2
-# Runs alongside GhostHands containers on the same host
+# GH_API_HOST / GH_WORKER_HOST come from .env (may be remote)
 
 services:
   atm-api:
@@ -11,9 +11,6 @@ services:
     env_file:
       - .env
     environment:
-      - GH_DEPLOY_PORT=8000
-      - GH_API_HOST=localhost
-      - GH_WORKER_HOST=localhost
       - DOCKER_CONFIG_PATH=/docker-config/config.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

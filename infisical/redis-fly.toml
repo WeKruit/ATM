@@ -1,0 +1,16 @@
+app = "infisical-redis"
+primary_region = "iad"
+
+[build]
+  image = "redis:7-alpine"
+
+[processes]
+  app = "redis-server --maxmemory 50mb --maxmemory-policy allkeys-lru"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = 256
+
+[mounts]
+  source = "redis_data"
+  destination = "/data"

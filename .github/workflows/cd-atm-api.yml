@@ -1,0 +1,49 @@
+name: CD → ATM API (EC2)
+
+on:
+    workflow_dispatch:
+    push:
+        branches: [main]
+        paths:
+            - "atm-api/**"
+
+concurrency:
+    group: deploy-atm-api
+    cancel-in-progress: false
+
+jobs:
+    ci:
+        uses: ./.github/workflows/ci-atm.yml
+        secrets: inherit
+
+    deploy:
+        name: Deploy to EC2
+        needs: ci
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+            - name: Deploy ATM API
+              uses: appleboy/ssh-action@v1
+              with:
+                  host: ${{ secrets.EC2_HOST }}
+                  username: ubuntu
+                  key: ${{ secrets.EC2_SSH_KEY }}
+                  script: |
+                      cd /opt/atm
+                      git pull origin main
+                      docker compose build atm-api
+                      docker compose up -d atm-api
+                      sleep 3
+                      curl -sf http://localhost:8000/health || exit 1
+
+            - name: Deploy summary
+              if: always()
+              run: |
+                  echo "### ATM API Deploy (EC2)" >> $GITHUB_STEP_SUMMARY
+                  echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+                  echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+                  echo "| Host | EC2 |" >> $GITHUB_STEP_SUMMARY
+                  echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+                  echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+                  echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

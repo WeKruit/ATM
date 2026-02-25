@@ -7,6 +7,8 @@
  * Uses Universal Auth (client ID + secret) for Machine Identity authentication.
  * Infisical is optional — if env vars are not configured, functions degrade gracefully.
  *
+ * Supports both SDK v2 (InfisicalClient) and v3+ (InfisicalSDK) APIs.
+ *
  * @module atm-api/src/infisical-client
  */
 
@@ -36,6 +38,74 @@ export function getInfisicalConfig(): InfisicalConfig | null {
   return { siteUrl, clientId, clientSecret, projectId, environment };
 }
 
+// ── SDK abstraction ─────────────────────────────────────────────────
+// @infisical/sdk v2 exports InfisicalClient (constructor auth, flat methods)
+// @infisical/sdk v3+ exports InfisicalSDK (separate auth(), secrets() chains)
+
+interface InfisicalWrapper {
+  listSecrets(opts: { projectId: string; environment: string; secretPath: string }): Promise<any[]>;
+  getSecret(opts: { secretName: string; projectId: string; environment: string; secretPath: string }): Promise<any>;
+}
+
+async function createClient(config: InfisicalConfig): Promise<InfisicalWrapper> {
+  const sdk: any = await import('@infisical/sdk');
+
+  // v2: InfisicalClient with constructor-based auth
+  const InfisicalClient = sdk.InfisicalClient || sdk.default?.InfisicalClient;
+  if (InfisicalClient) {
+    const client = new InfisicalClient({
+      siteUrl: config.siteUrl,
+      auth: {
+        universalAuth: {
+          clientId: config.clientId,
+          clientSecret: config.clientSecret,
+        },
+      },
+    });
+    return {
+      async listSecrets(opts) {
+        // v2 uses 'path' not 'secretPath'
+        return client.listSecrets({
+          projectId: opts.projectId,
+          environment: opts.environment,
+          path: opts.secretPath,
+        });
+      },
+      async getSecret(opts) {
+        return client.getSecret({
+          secretName: opts.secretName,
+          projectId: opts.projectId,
+          environment: opts.environment,
+          path: opts.secretPath,
+        });
+      },
+    };
+  }
+
+  // v3+: InfisicalSDK with separate auth/secrets chains
+  const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
+  if (InfisicalSDK) {
+    const client = new InfisicalSDK({ siteUrl: config.siteUrl });
+    await client.auth().universalAuth.login({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+    });
+    return {
+      async listSecrets(opts) {
+        const result = await client.secrets().listSecrets(opts);
+        return result?.secrets || result || [];
+      },
+      async getSecret(opts) {
+        return client.secrets().getSecret(opts);
+      },
+    };
+  }
+
+  throw new Error('@infisical/sdk loaded but neither InfisicalClient nor InfisicalSDK found');
+}
+
+// ── Public API ──────────────────────────────────────────────────────
+
 /**
  * Loads secrets from Infisical and merges them into process.env.
  * Existing env vars take precedence (same pattern as AWS SM loader).
@@ -52,37 +122,17 @@ export async function loadSecretsFromInfisical(): Promise<void> {
   }
 
   try {
-    // Dynamic import to avoid type issues with @infisical/sdk
-    const sdk: any = await import('@infisical/sdk');
-    const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
+    const client = await createClient(config);
 
-    if (!InfisicalSDK) {
-      console.warn(
-        '[atm-api] @infisical/sdk loaded but InfisicalSDK class not found. Skipping.',
-      );
-      return;
-    }
-
-    const client = new InfisicalSDK({
-      siteUrl: config.siteUrl,
-    });
-
-    await client.auth().universalAuth.login({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    });
-
-    const secrets = await client.secrets().listSecrets({
+    const secrets = await client.listSecrets({
       projectId: config.projectId,
       environment: config.environment,
       secretPath: '/',
     });
 
     let loaded = 0;
-    const secretList = secrets?.secrets || secrets || [];
-
-    if (Array.isArray(secretList)) {
-      for (const secret of secretList) {
+    if (Array.isArray(secrets)) {
+      for (const secret of secrets) {
         const key = secret.secretKey || secret.key;
         const value = secret.secretValue || secret.value;
         if (key && typeof value === 'string' && !process.env[key]) {
@@ -105,34 +155,27 @@ export async function loadSecretsFromInfisical(): Promise<void> {
 /**
  * Lists all secret keys with metadata (no values) from Infisical.
  * Returns empty array if Infisical is not configured or unavailable.
+ *
+ * @param secretPath - Folder path to list secrets from (default: '/')
  */
-export async function listSecretKeys(): Promise<
-  { key: string; createdAt: string; updatedAt: string }[]
-> {
+export async function listSecretKeys(
+  secretPath = '/',
+): Promise<{ key: string; createdAt: string; updatedAt: string }[]> {
   const config = getInfisicalConfig();
   if (!config) return [];
 
   try {
-    const sdk: any = await import('@infisical/sdk');
-    const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
-    if (!InfisicalSDK) return [];
+    const client = await createClient(config);
 
-    const client = new InfisicalSDK({ siteUrl: config.siteUrl });
-    await client.auth().universalAuth.login({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    });
-
-    const secrets = await client.secrets().listSecrets({
+    const secrets = await client.listSecrets({
       projectId: config.projectId,
       environment: config.environment,
-      secretPath: '/',
+      secretPath,
     });
 
-    const secretList = secrets?.secrets || secrets || [];
-    if (!Array.isArray(secretList)) return [];
+    if (!Array.isArray(secrets)) return [];
 
-    return secretList.map((s: any) => ({
+    return secrets.map((s: any) => ({
       key: s.secretKey || s.key || '',
       createdAt: s.createdAt || s.created_at || '',
       updatedAt: s.updatedAt || s.updated_at || '',
@@ -146,32 +189,26 @@ export async function listSecretKeys(): Promise<
 /**
  * Gets a single secret value by key from Infisical.
  * Throws if Infisical is not configured or the secret is not found.
+ *
+ * @param key - Secret key name
+ * @param secretPath - Folder path to look in (default: '/')
  */
 export async function getSecretValue(
   key: string,
+  secretPath = '/',
 ): Promise<{ key: string; value: string }> {
   const config = getInfisicalConfig();
   if (!config) {
     throw new Error('Infisical not configured');
   }
 
-  const sdk: any = await import('@infisical/sdk');
-  const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
-  if (!InfisicalSDK) {
-    throw new Error('InfisicalSDK class not found');
-  }
+  const client = await createClient(config);
 
-  const client = new InfisicalSDK({ siteUrl: config.siteUrl });
-  await client.auth().universalAuth.login({
-    clientId: config.clientId,
-    clientSecret: config.clientSecret,
-  });
-
-  const secret = await client.secrets().getSecret({
+  const secret = await client.getSecret({
     secretName: key,
     projectId: config.projectId,
     environment: config.environment,
-    secretPath: '/',
+    secretPath,
   });
 
   const value = secret?.secretValue ?? secret?.value;
@@ -182,14 +219,19 @@ export async function getSecretValue(
   return { key, value };
 }
 
+/** Service paths organized in Infisical */
+export const SECRET_PATHS = ['/valet', '/ghosthands', '/atm'] as const;
+
 /**
  * Returns Infisical connection status for the /secrets/status endpoint.
+ * Counts secrets across all service paths.
  */
 export async function getInfisicalStatus(): Promise<{
   connected: boolean;
   projectId?: string;
   environment?: string;
   secretCount?: number;
+  paths?: Record<string, number>;
   error?: string;
 }> {
   const config = getInfisicalConfig();
@@ -201,41 +243,34 @@ export async function getInfisicalStatus(): Promise<{
   }
 
   try {
-    const sdk: any = await import('@infisical/sdk');
-    const InfisicalSDK = sdk.InfisicalSDK || sdk.default?.InfisicalSDK;
+    const client = await createClient(config);
 
-    if (!InfisicalSDK) {
-      return {
-        connected: false,
-        projectId: config.projectId,
-        environment: config.environment,
-        error: '@infisical/sdk loaded but InfisicalSDK class not found',
-      };
+    // Count secrets across root + all service paths
+    const pathCounts: Record<string, number> = {};
+    let totalCount = 0;
+
+    for (const sp of ['/', ...SECRET_PATHS]) {
+      try {
+        const secrets = await client.listSecrets({
+          projectId: config.projectId,
+          environment: config.environment,
+          secretPath: sp,
+        });
+        const count = Array.isArray(secrets) ? secrets.length : 0;
+        pathCounts[sp] = count;
+        totalCount += count;
+      } catch {
+        // Path may not exist yet — that's OK
+        pathCounts[sp] = 0;
+      }
     }
-
-    const client = new InfisicalSDK({
-      siteUrl: config.siteUrl,
-    });
-
-    await client.auth().universalAuth.login({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    });
-
-    const secrets = await client.secrets().listSecrets({
-      projectId: config.projectId,
-      environment: config.environment,
-      secretPath: '/',
-    });
-
-    const secretList = secrets?.secrets || secrets || [];
-    const count = Array.isArray(secretList) ? secretList.length : 0;
 
     return {
       connected: true,
       projectId: config.projectId,
       environment: config.environment,
-      secretCount: count,
+      secretCount: totalCount,
+      paths: pathCounts,
     };
   } catch (err: any) {
     return {
