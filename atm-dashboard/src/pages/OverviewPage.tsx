@@ -120,19 +120,36 @@ export default function OverviewPage() {
           label="Worker"
           value={
             health?.workerStatus === 'idle' ? (
-              <div>
-                <span className="text-2xl font-bold text-green-400">Ready</span>
-                <p className="text-xs text-gray-500 mt-0.5">Polling for jobs</p>
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+                </span>
+                <div>
+                  <span className="text-lg font-bold text-green-400">Running</span>
+                  <span className="text-lg text-gray-500 font-light mx-1">&middot;</span>
+                  <span className="text-lg text-gray-400">Idle</span>
+                  <p className="text-xs text-gray-500 mt-0.5">Healthy, awaiting jobs</p>
+                </div>
               </div>
             ) : health?.activeWorkers ? (
-              <div>
-                <span className="text-2xl font-bold text-cyan-400">{health.activeWorkers} Active</span>
-                <p className="text-xs text-gray-500 mt-0.5">Processing jobs</p>
+              <div className="flex items-center gap-2">
+                <svg className="h-4 w-4 text-cyan-400 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                <div>
+                  <span className="text-lg font-bold text-cyan-400">Running</span>
+                  <span className="text-lg text-gray-500 font-light mx-1">&middot;</span>
+                  <span className="text-lg text-cyan-300">{health.activeWorkers} Job{health.activeWorkers > 1 ? 's' : ''}</span>
+                  <p className="text-xs text-gray-500 mt-0.5">Processing task{health.activeWorkers > 1 ? 's' : ''}</p>
+                </div>
               </div>
             ) : (
-              <span className="text-2xl font-bold tabular-nums text-gray-100">
-                {health?.activeWorkers ?? 0}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="inline-flex rounded-full h-2.5 w-2.5 bg-gray-500" />
+                <span className="text-lg font-bold text-gray-400">Offline</span>
+              </div>
             )
           }
         />
@@ -244,9 +261,11 @@ export default function OverviewPage() {
             <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4 flex items-center justify-between">
               <div>
                 <p className="text-sm text-gray-400">GH Worker</p>
-                <p className="text-xs text-gray-600 mt-0.5">Port 3101 {health.workerStatus === 'idle' ? '— awaiting jobs' : ''}</p>
+                <p className="text-xs text-gray-600 mt-0.5">
+                  Port 3101 — {health.workerStatus === 'idle' ? 'awaiting jobs' : health.activeWorkers ? `${health.activeWorkers} active` : health.workerStatus}
+                </p>
               </div>
-              <StatusBadge status={health.workerStatus === 'idle' ? 'Ready' : health.workerStatus} />
+              <StatusBadge status={health.workerStatus === 'idle' ? 'running' : health.activeWorkers ? 'active' : health.workerStatus} />
             </div>
           </div>
         </div>
