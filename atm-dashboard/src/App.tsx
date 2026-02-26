@@ -52,7 +52,7 @@ function writeUrlState(tab: Tab, machineId: string | null): void {
 }
 
 function AppContent() {
-  const { servers, setActiveServer, activeServer } = useFleet();
+  const { servers, setActiveServer } = useFleet();
 
   // Initialize state from URL params
   const initial = useMemo(() => readUrlState(), []);

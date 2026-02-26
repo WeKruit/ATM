@@ -181,6 +181,18 @@ export async function spawnKamal(
   return { exitCode, stdout, stderr, durationMs };
 }
 
+// ── Secrets fetcher injection (for tests) ────────────────────────────
+
+type SecretsFetcher = (destination: string) => Promise<Record<string, string>>;
+let secretsFetcherImpl: SecretsFetcher | null = null;
+
+/**
+ * Override the secrets fetcher (for tests). Pass null to reset.
+ */
+export function setSecretsFetcherImpl(fn: SecretsFetcher | null): void {
+  secretsFetcherImpl = fn;
+}
+
 // ── Secrets fetcher for Kamal deploys ────────────────────────────────
 
 /** The secrets Kamal deploy.yml declares under env.secret */
@@ -357,8 +369,9 @@ export async function kamalDeploy(
   onLine?: (line: string) => void,
 ): Promise<KamalResult> {
   // Fetch all secrets and write to files + inject as env vars
-  const secretEnv = await fetchSecretsForKamalDeploy(destination);
-  await writeSecretsFiles(secretEnv, destination);
+  const fetcher = secretsFetcherImpl ?? fetchSecretsForKamalDeploy;
+  const secretEnv = await fetcher(destination);
+  if (!secretsFetcherImpl) await writeSecretsFiles(secretEnv, destination);
 
   // Stop existing containers first (proxy: false + port publishing means
   // two containers can't bind the same port simultaneously)
@@ -391,8 +404,9 @@ export async function kamalRollback(
   onLine?: (line: string) => void,
 ): Promise<KamalResult> {
   // Fetch all secrets and write to files + inject as env vars
-  const secretEnv = await fetchSecretsForKamalDeploy(destination);
-  await writeSecretsFiles(secretEnv, destination);
+  const fetcher = secretsFetcherImpl ?? fetchSecretsForKamalDeploy;
+  const secretEnv = await fetcher(destination);
+  if (!secretsFetcherImpl) await writeSecretsFiles(secretEnv, destination);
 
   const args = ['rollback', version, '-d', destination];
   return spawnKamal(args, onLine, secretEnv);

@@ -8,6 +8,7 @@ import {
   kamalAudit,
   isKamalAvailable,
   setSpawnImpl,
+  setSecretsFetcherImpl,
   type SpawnFn,
 } from '../kamal-runner';
 
@@ -57,6 +58,7 @@ function mockSpawn(
 describe('kamal-runner', () => {
   afterEach(() => {
     setSpawnImpl(null);
+    setSecretsFetcherImpl(null);
   });
 
   describe('spawnKamal', () => {
@@ -135,22 +137,29 @@ describe('kamal-runner', () => {
   });
 
   describe('kamalDeploy', () => {
+    const mockSecrets = async () => ({ KAMAL_REGISTRY_PASSWORD: 'fake-token', GH_ENVIRONMENT: 'staging' });
+
     it('builds correct args without version', async () => {
       const { spawn, calls } = mockSpawn('deployed\n');
       setSpawnImpl(spawn);
+      setSecretsFetcherImpl(mockSecrets);
 
       await kamalDeploy('staging');
 
-      expect(calls[0].cmd).toEqual(['kamal', 'deploy', '-d', 'staging', '-P']);
+      // First call is 'kamal app stop', second is 'kamal deploy'
+      const deployCall = calls.find(c => c.cmd.includes('deploy'));
+      expect(deployCall?.cmd).toEqual(['kamal', 'deploy', '-d', 'staging', '-P']);
     });
 
     it('builds correct args with version', async () => {
       const { spawn, calls } = mockSpawn('deployed\n');
       setSpawnImpl(spawn);
+      setSecretsFetcherImpl(mockSecrets);
 
       await kamalDeploy('production', 'v1.2.3');
 
-      expect(calls[0].cmd).toEqual([
+      const deployCall = calls.find(c => c.cmd.includes('deploy'));
+      expect(deployCall?.cmd).toEqual([
         'kamal', 'deploy', '-d', 'production', '--version', 'v1.2.3', '-P',
       ]);
     });
@@ -160,6 +169,7 @@ describe('kamal-runner', () => {
     it('builds correct args', async () => {
       const { spawn, calls } = mockSpawn('rolled back\n');
       setSpawnImpl(spawn);
+      setSecretsFetcherImpl(async () => ({ KAMAL_REGISTRY_PASSWORD: 'fake-token' }));
 
       await kamalRollback('staging', 'v1.0.0');
 
