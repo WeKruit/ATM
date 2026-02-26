@@ -5,7 +5,7 @@ Centralized operations platform for the WeKruit infrastructure. Owns secrets man
 ## Architecture
 
 - **Infisical** (Fly.io) — Self-hosted secrets management with web UI, Fly.io auto-sync, EC2 agent pull
-- **ATM API** (EC2, port 8000) — Bun.js HTTP server wrapping Docker Engine API for deploys, rollback, health, metrics
+- **ATM API** (EC2, port 8080) — Bun.js HTTP server wrapping Docker Engine API for deploys, rollback, health, metrics
 - **VALET admin UI** consumes both Infisical API (secrets) and ATM API (deploys/fleet)
 
 ## Sibling Projects
@@ -58,7 +58,7 @@ See `.env.example` for all required variables. Key ones:
 | Variable | Description |
 |----------|-------------|
 | `GH_DEPLOY_SECRET` | Shared secret for deploy auth (X-Deploy-Secret header) |
-| `GH_DEPLOY_PORT` | ATM API listen port (default: 8000) |
+| `GH_DEPLOY_PORT` | ATM API listen port (default: 8080) |
 | `GH_API_HOST` | GH API hostname (default: localhost) |
 | `GH_API_PORT` | GH API port (default: 3100) |
 | `GH_WORKER_HOST` | GH Worker hostname (default: localhost) |

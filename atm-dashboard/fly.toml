@@ -2,7 +2,7 @@
 # Serves the React SPA and proxies API requests to the EC2 ATM backend.
 #
 # Required secrets:
-#   fly secrets set ATM_API_URL=http://<ec2-ip>:8000
+#   fly secrets set ATM_API_URL=http://<ec2-ip>:8080
 #
 # Deploy:
 #   cd atm-dashboard && fly deploy

@@ -35,7 +35,7 @@ jobs:
                       docker compose build atm-api
                       docker compose up -d atm-api
                       sleep 3
-                      curl -sf http://localhost:8000/health || exit 1
+                      curl -sf http://localhost:8080/health || exit 1
 
             - name: Deploy summary
               if: always()

@@ -1,7 +1,7 @@
 /**
  * ATM API Server (migrated from GhostHands deploy-server.ts)
  *
- * Lightweight HTTP server on port 8000 that VALET's DeployService calls
+ * Lightweight HTTP server on port 8080 that VALET's DeployService calls
  * to trigger deploys and check health on each EC2 sandbox.
  *
  * Endpoints:
@@ -45,7 +45,7 @@
  *
  * Environment:
  *   GH_DEPLOY_SECRET     — Required. Shared secret for deploy auth.
- *   GH_DEPLOY_PORT       — Port to listen on (default: 8000)
+ *   GH_DEPLOY_PORT       — Port to listen on (default: 8080)
  *   GH_API_PORT          — GH API health port (default: 3100)
  *   GH_WORKER_PORT       — GH worker status port (default: 3101)
  *   GH_ENVIRONMENT       — Deploy environment: staging | production (default: staging)
@@ -122,7 +122,7 @@ try {
 }
 await loadSecretsFromAwsSm();
 
-const DEPLOY_PORT = parseInt(process.env.GH_DEPLOY_PORT || '8000', 10);
+const DEPLOY_PORT = parseInt(process.env.GH_DEPLOY_PORT || '8080', 10);
 const DEPLOY_SECRET = process.env.ATM_DEPLOY_SECRET || process.env.GH_DEPLOY_SECRET;
 const API_HOST = process.env.GH_API_HOST || 'localhost';
 const API_PORT = parseInt(process.env.GH_API_PORT || '3100', 10);
@@ -168,6 +168,49 @@ function resolveProjectPath(relativePath: string): string | null {
   return null;
 }
 
+/**
+ * Auto-discover GH fleet entries from Kamal deploy configs.
+ * Returns FleetServer entries for each unique host IP found across all destinations.
+ */
+function discoverFleetFromKamal(): FleetServer[] {
+  const configDir = resolveProjectPath('config');
+  if (!configDir) return [];
+
+  const discovered: FleetServer[] = [];
+  const seenIps = new Set<string>();
+  let workerIndex = 1;
+
+  for (const dest of ['staging', 'production']) {
+    const destFile = path.join(configDir, `deploy.${dest}.yml`);
+    try {
+      const content = fs.readFileSync(destFile, 'utf-8');
+      const hosts = parseKamalHosts(content);
+      // Collect all unique IPs from web + workers roles
+      for (const role of Object.values(hosts)) {
+        for (const ip of role) {
+          if (seenIps.has(ip)) continue;
+          seenIps.add(ip);
+          discovered.push({
+            id: `gh-worker-${workerIndex}`,
+            name: `GH Worker ${workerIndex}`,
+            host: `/fleet/gh-worker-${workerIndex}`,
+            environment: dest,
+            region: 'us-east-1',
+            ip,
+            type: 't3.large',
+            role: 'ghosthands',
+          });
+          workerIndex++;
+        }
+      }
+    } catch {
+      // Config file missing or unreadable — skip this destination
+    }
+  }
+
+  return discovered;
+}
+
 function loadFleetConfig(): FleetServer[] {
   // Try FLEET_CONFIG env var first (JSON string)
   if (process.env.FLEET_CONFIG) {
@@ -181,23 +224,45 @@ function loadFleetConfig(): FleetServer[] {
     }
   }
 
-  // Fall back to fleet.json file
+  // Load fleet.json for ATM self-entry and metadata overrides
+  let jsonServers: FleetServer[] = [];
   const fleetPath = resolveProjectPath('atm-dashboard/public/fleet.json')
     || resolveProjectPath('config/fleet.json');
   if (fleetPath) {
     try {
       const raw = fs.readFileSync(fleetPath, 'utf-8');
       const parsed = JSON.parse(raw);
-      fleetServers = parsed.servers || [];
-      console.log(`[atm-api] Loaded ${fleetServers.length} servers from ${fleetPath}`);
+      jsonServers = parsed.servers || [];
     } catch (e) {
-      console.log('[atm-api] Failed to parse fleet.json, using env-based fleet config');
-      fleetServers = [];
+      console.log('[atm-api] Failed to parse fleet.json');
     }
+  }
+
+  // Auto-discover GH hosts from Kamal configs
+  const kamalHosts = discoverFleetFromKamal();
+
+  if (kamalHosts.length > 0) {
+    // Keep non-ghosthands entries from fleet.json (ATM self-entry, etc.)
+    const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
+    // Apply fleet.json overrides: if fleet.json has a GH entry matching an IP, merge its metadata
+    const overridesByIp = new Map(
+      jsonServers.filter(s => s.role === 'ghosthands').map(s => [s.ip, s])
+    );
+    const mergedGh = kamalHosts.map(discovered => {
+      const override = overridesByIp.get(discovered.ip);
+      return override ? { ...discovered, ...override } : discovered;
+    });
+    fleetServers = [...nonGhEntries, ...mergedGh];
+    console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + ${mergedGh.length} auto-discovered from Kamal`);
+  } else if (jsonServers.length > 0) {
+    // Kamal configs missing/empty — fall back to fleet.json entirely
+    fleetServers = jsonServers;
+    console.log(`[atm-api] Loaded ${fleetServers.length} servers from fleet.json (Kamal fallback)`);
   } else {
-    console.log('[atm-api] No fleet.json found, using env-based fleet config');
+    console.log('[atm-api] No fleet config found');
     fleetServers = [];
   }
+
   return fleetServers;
 }
 
