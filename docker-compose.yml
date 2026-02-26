@@ -12,10 +12,13 @@ services:
       - .env
     environment:
       - DOCKER_CONFIG_PATH=/docker-config/config.json
+      - DEPLOY_HISTORY_PATH=/data/deploy-history.json
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ubuntu/.docker/config.json:/docker-config/config.json:ro
       - /opt/ghosthands:/opt/ghosthands:ro
+      # Deploy history (writable, persisted across restarts)
+      - /opt/atm/data:/data
       # Kamal SSH key
       - /home/ubuntu/.ssh/gh-deploy-key:/root/.ssh/gh-deploy-key:ro
       # Kamal config + secrets
