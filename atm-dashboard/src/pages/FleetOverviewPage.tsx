@@ -84,7 +84,7 @@ function ServerCard({ server, status, onClick }: { server: Server; status?: Serv
         <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
           <div className="rounded bg-gray-800/60 p-2">
             <span className="text-gray-500">Status</span>
-            <p className={`font-medium ${health.status === 'ok' ? 'text-green-400' : 'text-yellow-400'}`}>{health.status}</p>
+            <p className={`font-medium ${health.status === 'healthy' ? 'text-green-400' : 'text-yellow-400'}`}>{health.status}</p>
           </div>
           <div className="rounded bg-gray-800/60 p-2">
             <span className="text-gray-500">Workers</span>

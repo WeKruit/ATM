@@ -123,7 +123,7 @@ try {
 await loadSecretsFromAwsSm();
 
 const DEPLOY_PORT = parseInt(process.env.GH_DEPLOY_PORT || '8000', 10);
-const DEPLOY_SECRET = process.env.GH_DEPLOY_SECRET;
+const DEPLOY_SECRET = process.env.ATM_DEPLOY_SECRET || process.env.GH_DEPLOY_SECRET;
 const API_HOST = process.env.GH_API_HOST || 'localhost';
 const API_PORT = parseInt(process.env.GH_API_PORT || '3100', 10);
 const WORKER_HOST = process.env.GH_WORKER_HOST || 'localhost';
@@ -218,7 +218,7 @@ interface DeployFailure {
 }
 
 if (!DEPLOY_SECRET) {
-  console.error('[atm-api] FATAL: GH_DEPLOY_SECRET is required');
+  console.error('[atm-api] FATAL: ATM_DEPLOY_SECRET (or GH_DEPLOY_SECRET) is required');
   process.exit(1);
 }
 
@@ -881,8 +881,18 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json([worker]);
         }
 
-        // ── /fleet/:id/metrics — GH has no system metrics endpoint ──
+        // ── /fleet/:id/metrics — Try GH /monitoring/system, fall back to zeros ──
         if (endpoint === '/metrics') {
+          const sysMetrics = await safeFetch<{
+            cpu: { usagePercent: number; cores: number };
+            memory: { usedMb: number; totalMb: number; usagePercent: number };
+            disk: { usedGb: number; totalGb: number; usagePercent: number };
+          }>(`${ghApiBase}/monitoring/system`);
+
+          if (sysMetrics) {
+            return Response.json(sysMetrics);
+          }
+
           return Response.json({
             cpu: { usagePercent: 0, cores: 0 },
             memory: { usedMb: 0, totalMb: 0, usagePercent: 0 },

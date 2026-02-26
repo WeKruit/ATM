@@ -97,15 +97,15 @@ export default function KamalPage() {
   const handleDeploy = async () => {
     setDeploying(true);
     setError(null);
-    setShowStream(true); // Open SSE first so it catches all output
+    setShowStream(true);
 
     try {
-      // This POST starts the deploy and returns when it finishes.
-      // Meanwhile the SSE stream shows live output.
       await post('/deploy/kamal', { destination, version: destination }, secret);
+      // POST succeeded — deploy is done. Reset deploying state but keep stream visible.
+      setDeploying(false);
+      fetchAll();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Deploy failed';
-      // Parse common status codes for clearer messages
       if (msg.includes('401')) {
         setError('Unauthorized -- check your deploy secret.');
       } else if (msg.includes('409')) {
@@ -113,7 +113,6 @@ export default function KamalPage() {
       } else {
         setError(msg);
       }
-      // If auth failed or conflict, the deploy never started -- close the stream
       setShowStream(false);
       setDeploying(false);
     }
