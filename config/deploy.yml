@@ -11,23 +11,21 @@ readiness_delay: 7
 servers:
   web:
     hosts: []
-    cmd: packages/ghosthands/src/api/server.ts
+    cmd: bun packages/ghosthands/src/api/server.ts
     labels:
       gh.service: api
       gh.managed: "true"
     options:
-      entrypoint: /usr/local/bin/bun
       publish:
         - 3100:3100
     proxy: false
   workers:
     hosts: []
-    cmd: packages/ghosthands/src/workers/main.ts
+    cmd: bun packages/ghosthands/src/workers/main.ts
     labels:
       gh.service: worker
       gh.managed: "true"
     options:
-      entrypoint: /usr/local/bin/bun
       publish:
         - 3101:3101
         - 6901:6901
@@ -74,3 +72,5 @@ env:
     - CORS_ORIGIN
     - VALET_DEPLOY_WEBHOOK_SECRET
     - SILICONFLOW_API_KEY
+    - GH_CREDENTIAL_KEY
+    - VNC_PW
