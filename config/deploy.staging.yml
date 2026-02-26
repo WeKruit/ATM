@@ -1,3 +1,9 @@
+# Staging destination for Kamal deploys
+# To add a new GH EC2 instance, append its IP to both web and workers hosts:
+#   hosts:
+#     - 44.223.180.11    # gh-worker-1
+#     - 10.0.0.2          # gh-worker-2 (example)
+# Kamal v2 deploys to all hosts in parallel by default.
 servers:
   web:
     hosts:

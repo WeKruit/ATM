@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
-import { get } from '../api';
+import { get, post } from '../api';
 import type { KamalStatus, KamalAuditEntry } from '../api';
 import StatusBadge from '../components/StatusBadge';
 import LogStream from '../components/LogStream';
 import DataTable, { type Column } from '../components/DataTable';
+
+const DESTINATIONS = ['staging', 'production'] as const;
 
 const auditColumns: Column<KamalAuditEntry>[] = [
   {
@@ -44,7 +46,6 @@ const auditColumns: Column<KamalAuditEntry>[] = [
 ];
 
 export default function KamalPage() {
-  // Kamal is global (managed by ATM), always fetch from same origin
   const [status, setStatus] = useState<KamalStatus | null>(null);
   const [audit, setAudit] = useState<KamalAuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,7 +53,23 @@ export default function KamalPage() {
   const [showStream, setShowStream] = useState(false);
   const [deploying, setDeploying] = useState(false);
 
+  // Auth
+  const [secret, setSecret] = useState(() => sessionStorage.getItem('atm-deploy-secret') || '');
+
+  // Deploy
+  const [destination, setDestination] = useState<string>('staging');
+
+  // Rollback
+  const [rollbackVersion, setRollbackVersion] = useState('');
+  const [rollingBack, setRollingBack] = useState(false);
+  const [rollbackResult, setRollbackResult] = useState<{ success: boolean; message: string } | null>(null);
+
   const base = '';
+
+  const handleSecretChange = (val: string) => {
+    setSecret(val);
+    sessionStorage.setItem('atm-deploy-secret', val);
+  };
 
   const fetchAll = useCallback(async () => {
     try {
@@ -76,6 +93,59 @@ export default function KamalPage() {
     const interval = setInterval(fetchAll, 15000);
     return () => clearInterval(interval);
   }, [fetchAll]);
+
+  const handleDeploy = async () => {
+    setDeploying(true);
+    setError(null);
+    setShowStream(true); // Open SSE first so it catches all output
+
+    try {
+      // This POST starts the deploy and returns when it finishes.
+      // Meanwhile the SSE stream shows live output.
+      await post('/deploy/kamal', { destination, version: destination }, secret);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Deploy failed';
+      // Parse common status codes for clearer messages
+      if (msg.includes('401')) {
+        setError('Unauthorized -- check your deploy secret.');
+      } else if (msg.includes('409')) {
+        setError('Deploy already in progress. Wait for it to finish.');
+      } else {
+        setError(msg);
+      }
+      // If auth failed or conflict, the deploy never started -- close the stream
+      setShowStream(false);
+      setDeploying(false);
+    }
+  };
+
+  const handleRollback = async () => {
+    if (!rollbackVersion.trim()) return;
+    setRollingBack(true);
+    setError(null);
+    setRollbackResult(null);
+
+    try {
+      const res = await post<{ success: boolean; message: string }>(
+        '/rollback/kamal',
+        { destination, version: rollbackVersion.trim() },
+        secret,
+      );
+      setRollbackResult({ success: true, message: res.message || 'Rollback completed successfully.' });
+      fetchAll();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Rollback failed';
+      if (msg.includes('401')) {
+        setRollbackResult({ success: false, message: 'Unauthorized -- check your deploy secret.' });
+      } else if (msg.includes('400')) {
+        setRollbackResult({ success: false, message: 'Bad request -- check the version string.' });
+      } else {
+        setRollbackResult({ success: false, message: msg });
+      }
+    } finally {
+      setRollingBack(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -140,16 +210,46 @@ export default function KamalPage() {
         </div>
       </div>
 
+      {/* Authentication & Destination */}
+      <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
+        <h2 className="text-sm font-semibold text-gray-300 mb-3">Authentication</h2>
+        <div className="flex items-center gap-3">
+          <input
+            type="password"
+            value={secret}
+            onChange={(e) => handleSecretChange(e.target.value)}
+            placeholder="Deploy secret (X-Deploy-Secret)"
+            className="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600"
+          />
+          <select
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            className="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          >
+            {DESTINATIONS.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        </div>
+        {!secret && (
+          <p className="text-xs text-gray-500 mt-2">
+            Enter the deploy secret to enable deploy and rollback actions.
+          </p>
+        )}
+      </div>
+
       {/* Deploy Actions */}
       {status?.available && (
         <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-6">
           <h2 className="text-sm font-semibold text-gray-300 mb-4">Deploy Actions</h2>
           <div className="flex items-center gap-4">
             <button
-              onClick={() => { setDeploying(true); setShowStream(true); }}
-              disabled={deploying || status.locked}
+              onClick={handleDeploy}
+              disabled={!secret || deploying || status.locked}
               className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                deploying || status.locked
+                !secret || deploying || status.locked
                   ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
                   : 'bg-blue-600 text-white hover:bg-blue-500'
               }`}
@@ -157,8 +257,8 @@ export default function KamalPage() {
               {deploying ? 'Deploying...' : 'Deploy via Kamal'}
             </button>
             <p className="text-xs text-gray-500">
-              Trigger a Kamal deploy for the current environment.
-              Requires X-Deploy-Secret authentication via the API.
+              Deploy <span className="font-mono text-gray-400">{destination}</span> via Kamal.
+              The live stream below shows real-time output.
             </p>
           </div>
           {status.locked && (
@@ -195,6 +295,48 @@ export default function KamalPage() {
             active={showStream}
             onComplete={() => { setDeploying(false); fetchAll(); }}
           />
+        </div>
+      )}
+
+      {/* Rollback Section */}
+      {status?.available && (
+        <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-6">
+          <h2 className="text-sm font-semibold text-gray-300 mb-4">Rollback</h2>
+          <div className="flex items-center gap-3">
+            <input
+              type="text"
+              value={rollbackVersion}
+              onChange={(e) => setRollbackVersion(e.target.value)}
+              placeholder="Version to rollback to, e.g. abc123"
+              className="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600 font-mono"
+            />
+            <button
+              onClick={handleRollback}
+              disabled={!secret || !rollbackVersion.trim() || rollingBack}
+              className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                !secret || !rollbackVersion.trim() || rollingBack
+                  ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                  : 'bg-yellow-600 text-white hover:bg-yellow-500'
+              }`}
+            >
+              {rollingBack ? 'Rolling back...' : 'Rollback'}
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Roll back <span className="font-mono text-gray-400">{destination}</span> to a specific version (image tag or commit SHA).
+          </p>
+
+          {rollbackResult && (
+            <div
+              className={`mt-4 rounded-lg border p-4 text-sm ${
+                rollbackResult.success
+                  ? 'border-green-500/30 bg-green-500/10 text-green-400'
+                  : 'border-red-500/30 bg-red-500/10 text-red-400'
+              }`}
+            >
+              {rollbackResult.message}
+            </div>
+          )}
         </div>
       )}
 

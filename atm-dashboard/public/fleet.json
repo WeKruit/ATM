@@ -1,5 +1,6 @@
 {
-  "_note": "Fallback for local dev only. Production uses GET /fleet API.",
+  "_note": "Fleet configuration for ATM. Adding a server here auto-registers it in the dashboard and fleet proxy. Reload with POST /fleet/reload.",
+  "_format": "Each server needs: id (unique slug), name (display), host (proxy prefix, empty for same-origin), ip (actual IP), role (atm|ghosthands), environment, region, type",
   "servers": [
     {
       "id": "atm-gw1",

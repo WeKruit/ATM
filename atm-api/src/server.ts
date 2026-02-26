@@ -22,8 +22,12 @@
  *   GET  /kamal/validate       — Pre-deploy validation checks (no auth)
  *   GET  /kamal/status         — Kamal availability + lock status (no auth)
  *   GET  /kamal/audit          — Kamal audit log (no auth)
+ *   GET  /kamal/hosts          — Kamal hosts per role per destination (no auth)
  *   POST /deploy/kamal         — Trigger Kamal deploy (requires X-Deploy-Secret)
  *   POST /rollback/kamal       — Trigger Kamal rollback (requires X-Deploy-Secret)
+ *   GET  /fleet                — Dynamic fleet server registry (no auth)
+ *   POST /fleet/reload         — Reload fleet config from disk (requires X-Deploy-Secret)
+ *   GET  /fleet/:id/*          — Smart proxy to fleet servers (no auth)
  *   GET  /dashboard            — Serve dashboard SPA (no auth)
  *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
@@ -132,6 +136,48 @@ const currentEnvironment: 'staging' | 'production' =
 
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
+
+// ── Fleet Config ────────────────────────────────────────────────────
+
+interface FleetServer {
+  id: string;
+  name: string;
+  host: string;
+  environment: string;
+  region: string;
+  ip: string;
+  type: string;
+  role: string;
+}
+
+let fleetServers: FleetServer[] = [];
+
+function loadFleetConfig(): FleetServer[] {
+  // Try FLEET_CONFIG env var first (JSON string)
+  if (process.env.FLEET_CONFIG) {
+    try {
+      const parsed = JSON.parse(process.env.FLEET_CONFIG);
+      fleetServers = parsed.servers || parsed;
+      console.log(`[atm-api] Loaded ${fleetServers.length} servers from FLEET_CONFIG env`);
+      return fleetServers;
+    } catch (e) {
+      console.error('[atm-api] Failed to parse FLEET_CONFIG env:', e);
+    }
+  }
+
+  // Fall back to fleet.json file
+  try {
+    const configPath = path.resolve(import.meta.dir, '../../atm-dashboard/public/fleet.json');
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    fleetServers = parsed.servers || [];
+    console.log(`[atm-api] Loaded ${fleetServers.length} servers from fleet.json`);
+  } catch (e) {
+    console.log('[atm-api] No fleet.json found, using env-based fleet config');
+    fleetServers = [];
+  }
+  return fleetServers;
+}
 
 // ── Deploy Result Types ─────────────────────────────────────────────
 
@@ -370,6 +416,73 @@ function withCors(response: Response): Response {
   return response;
 }
 
+/**
+ * Parses a Kamal destination YAML file and extracts hosts per role.
+ *
+ * Expects the simple structure used by our deploy.{destination}.yml files:
+ *   servers:
+ *     web:
+ *       hosts:
+ *         - <ip>
+ *     workers:
+ *       hosts:
+ *         - <ip>
+ *
+ * Returns { web: string[], workers: string[] }.
+ */
+function parseKamalHosts(yamlContent: string): Record<string, string[]> {
+  const result: Record<string, string[]> = { web: [], workers: [] };
+  const lines = yamlContent.split('\n');
+
+  let currentRole: string | null = null;
+  let inHosts = false;
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+
+    // Reset context if we hit a top-level key (no leading whitespace)
+    if (trimmed.match(/^[a-z]/)) {
+      currentRole = null;
+      inHosts = false;
+    }
+
+    // Match role headers: "  web:" or "  workers:"
+    const roleMatch = trimmed.match(/^\s{2,4}(web|workers):\s*$/);
+    if (roleMatch) {
+      currentRole = roleMatch[1];
+      inHosts = false;
+      continue;
+    }
+
+    // Match "hosts:" under a role
+    if (currentRole && trimmed.match(/^\s{4,6}hosts:/)) {
+      // Check if it's "hosts: []" (empty)
+      if (trimmed.includes('[]')) {
+        result[currentRole] = [];
+        inHosts = false;
+      } else {
+        inHosts = true;
+      }
+      continue;
+    }
+
+    // Match host entries: "      - 44.223.180.11"
+    if (inHosts && currentRole) {
+      const hostMatch = trimmed.match(/^\s{6,8}-\s+(\S+)/);
+      if (hostMatch) {
+        // Strip any trailing comment
+        const host = hostMatch[1].replace(/#.*$/, '').trim();
+        if (host) result[currentRole].push(host);
+      } else if (trimmed.trim() && !trimmed.match(/^\s*#/)) {
+        // Non-empty, non-comment line that isn't a host = end of hosts list
+        inHosts = false;
+      }
+    }
+  }
+
+  return result;
+}
+
 if (typeof Bun !== 'undefined') {
   Bun.serve({
     port: DEPLOY_PORT,
@@ -383,6 +496,7 @@ if (typeof Bun !== 'undefined') {
     },
   });
 
+  loadFleetConfig();
   console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
   console.log(`[atm-api] GH API: ${API_HOST}:${API_PORT}, Worker: ${WORKER_HOST}:${WORKER_PORT}`);
   console.log(`[atm-api] Environment: ${currentEnvironment}, Deploy method: Docker API`);
@@ -551,9 +665,14 @@ async function handleRequest(req: Request): Promise<Response> {
       }
 
       // ── GET /fleet — Dynamic fleet registry ──────────────────
-      // Returns the list of servers ATM knows about, built from env vars.
-      // Dashboard uses this instead of static fleet.json.
+      // Returns the list of servers ATM knows about.
+      // Prefers fleet config (FLEET_CONFIG env or fleet.json), falls back to env vars.
       if (url.pathname === '/fleet' && req.method === 'GET') {
+        if (fleetServers.length > 0) {
+          return Response.json({ servers: fleetServers });
+        }
+
+        // Fallback: build from env vars (legacy single-server mode)
         const servers: Array<Record<string, unknown>> = [
           {
             id: 'atm-gw1',
@@ -584,6 +703,18 @@ async function handleRequest(req: Request): Promise<Response> {
         return Response.json({ servers });
       }
 
+      // ── POST /fleet/reload — Reload fleet config from disk ─────
+      if (url.pathname === '/fleet/reload' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const servers = loadFleetConfig();
+        return Response.json({ success: true, count: servers.length, servers });
+      }
+
       // ── GET /fleet/:id/* — Smart proxy to fleet servers ───────
       // Intercepts known sub-paths and transforms raw GH responses into
       // the shapes the ATM dashboard expects (HealthResponse, VersionResponse, etc.).
@@ -603,13 +734,17 @@ async function handleRequest(req: Request): Promise<Response> {
           return handleRequest(new Request(selfUrl.toString(), req));
         }
 
-        // Resolve GH server
-        if (serverId !== 'gh-worker-1') {
+        // Dynamic lookup from fleet config, with env-var fallback for gh-worker-1
+        const fleetEntry = fleetServers.find(s => s.id === serverId)
+          || (serverId === 'gh-worker-1' ? { ip: API_HOST } : null);
+
+        if (!fleetEntry || !fleetEntry.ip) {
           return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
         }
 
-        const ghApiBase = `http://${API_HOST}:${API_PORT}`;
-        const ghWorkerBase = `http://${WORKER_HOST}:${WORKER_PORT}`;
+        const serverIp = fleetEntry.ip;
+        const ghApiBase = `http://${serverIp}:${API_PORT}`;
+        const ghWorkerBase = `http://${serverIp}:${WORKER_PORT}`;
 
         /** Safe fetch that returns null on failure instead of throwing */
         const safeFetch = async <T>(url: string): Promise<T | null> => {
@@ -1167,6 +1302,31 @@ async function handleRequest(req: Request): Promise<Response> {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return Response.json({ error: `Audit failed: ${msg}` }, { status: 500 });
+        }
+      }
+
+      // ── GET /kamal/hosts — Hosts per role per destination ─────
+      if (url.pathname === '/kamal/hosts' && req.method === 'GET') {
+        try {
+          const configDir = path.resolve(import.meta.dir, '../../config');
+          const destinations = ['staging', 'production'];
+          const result: Record<string, Record<string, string[]>> = {};
+
+          for (const dest of destinations) {
+            const destFile = path.join(configDir, `deploy.${dest}.yml`);
+            try {
+              const content = fs.readFileSync(destFile, 'utf-8');
+              const hosts = parseKamalHosts(content);
+              result[dest] = hosts;
+            } catch {
+              result[dest] = { web: [], workers: [] };
+            }
+          }
+
+          return Response.json(result);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: `Failed to read Kamal config: ${msg}` }, { status: 500 });
         }
       }
 

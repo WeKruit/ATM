@@ -1,3 +1,10 @@
+# Production destination for Kamal deploys
+# To add a production GH EC2 instance, add its IP to both web and workers hosts:
+#   hosts:
+#     - <production-ip-1>    # gh-prod-1
+#     - <production-ip-2>    # gh-prod-2 (example)
+# Kamal v2 deploys to all hosts in parallel by default.
+# NOTE: Production hosts are not yet configured.
 servers:
   web:
     hosts: []

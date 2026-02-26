@@ -1,7 +1,14 @@
 # Multi-EC2 Fleet Architecture: 3 Epics Across VALET, ATM, GHOST-HANDS
 
 **Created:** 2026-02-25
-**Status:** Planning — awaiting execution
+**Status:** P0 complete — Phase 2 next
+
+### TODO: ATM Dashboard Access (Option B — Security Hardening)
+- Currently: `atm-direct.wekruit.com:8000` bypasses Cloudflare (DNS-only, grey cloud)
+- Goal: Route through Cloudflare proxy for DDoS protection + HTTPS
+- Plan: Switch ATM to listen on port **8080** (Cloudflare-supported) or add nginx reverse proxy 8080→8000
+- Then flip `atm-gw1.wekruit.com` back to orange cloud (proxied)
+- Adds: HTTPS termination, DDoS protection, rate limiting via Cloudflare
 
 ---
 
