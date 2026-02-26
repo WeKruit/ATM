@@ -55,7 +55,7 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
 
       {servers.length === 0 && (
         <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-8 text-center text-gray-500">
-          No servers configured. Edit public/fleet.json to add servers.
+          No servers configured. Check ATM server environment variables.
         </div>
       )}
     </div>
@@ -78,7 +78,7 @@ function ServerCard({ server, status, onClick }: { server: Server; status?: Serv
         <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded">{server.environment}</span>
       </div>
 
-      <div className="text-xs text-gray-500 font-mono mb-3">{server.region} &middot; {server.host.replace(/^https?:\/\//, '')}</div>
+      <div className="text-xs text-gray-500 font-mono mb-3">{server.region} &middot; {server.ip || server.host.replace(/^https?:\/\//, '') || 'localhost'}</div>
 
       {reachable && health && (
         <div className="grid grid-cols-2 gap-2 mb-3 text-xs">

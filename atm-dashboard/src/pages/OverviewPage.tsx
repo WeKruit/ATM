@@ -50,14 +50,15 @@ export default function OverviewPage() {
     if (!activeServer) return;
     try {
       const [h, m, v] = await Promise.all([
-        get<HealthResponse>('/health', base),
-        get<MetricsResponse>('/metrics', base),
-        get<VersionResponse>('/version', base),
+        get<HealthResponse>('/health', base).catch(() => null),
+        get<MetricsResponse>('/metrics', base).catch(() => null),
+        get<VersionResponse>('/version', base).catch(() => null),
       ]);
       setHealth(h);
       setMetrics(m);
       setVersion(v);
-      setError(null);
+      // Only show error if health (the primary endpoint) failed
+      setError(h ? null : 'Server health endpoint unreachable');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch');
     } finally {

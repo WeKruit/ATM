@@ -35,6 +35,9 @@ export interface Server {
   host: string;
   environment: string;
   region: string;
+  ip?: string;
+  type?: string;
+  role?: string;
 }
 
 export interface FleetConfig {

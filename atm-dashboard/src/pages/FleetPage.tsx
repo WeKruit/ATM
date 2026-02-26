@@ -108,8 +108,8 @@ export default function FleetPage() {
     if (!activeServer) return;
     try {
       const [c, w] = await Promise.all([
-        get<Container[]>('/containers', base),
-        get<Worker[]>('/workers', base),
+        get<Container[]>('/containers', base).catch(() => [] as Container[]),
+        get<Worker[]>('/workers', base).catch(() => [] as Worker[]),
       ]);
       setContainers(c);
       setWorkers(w);

@@ -3,14 +3,12 @@ import { useEffect, useState, useCallback } from 'react';
 import { get, getWithAuth } from '../api';
 import type { SecretsStatus, SecretKey, SecretEntry } from '../api';
 import StatusBadge from '../components/StatusBadge';
-import { useFleet } from '../context/FleetContext';
-
 const SECRET_PATHS = ['/', '/valet', '/ghosthands', '/atm'] as const;
 const INFISICAL_URL = 'https://infisical-wekruit.fly.dev';
 
 export default function SecretsPage() {
-  const { activeServer } = useFleet();
-  const base = activeServer?.host || '';
+  // Secrets are global (managed by ATM), always fetch from same origin
+  const base = '';
 
   const [status, setStatus] = useState<SecretsStatus | null>(null);
   const [loading, setLoading] = useState(true);

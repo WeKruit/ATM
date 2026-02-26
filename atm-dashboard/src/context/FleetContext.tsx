@@ -25,7 +25,7 @@ export function FleetProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/fleet.json')
+    fetch('/fleet')
       .then((r) => r.json())
       .then((data: FleetConfig) => {
         setServers(data.servers);

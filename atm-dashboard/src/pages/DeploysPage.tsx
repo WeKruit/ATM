@@ -82,7 +82,7 @@ export default function DeploysPage() {
   const fetchDeploys = useCallback(async () => {
     if (!activeServer) return;
     try {
-      const data = await get<Deploy[]>('/deploys?limit=50', base);
+      const data = await get<Deploy[]>('/deploys?limit=50', base).catch(() => [] as Deploy[]);
       setDeploys(data);
       setError(null);
     } catch (err) {

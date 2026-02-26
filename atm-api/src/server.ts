@@ -550,6 +550,221 @@ async function handleRequest(req: Request): Promise<Response> {
         return Response.json(record);
       }
 
+      // ── GET /fleet — Dynamic fleet registry ──────────────────
+      // Returns the list of servers ATM knows about, built from env vars.
+      // Dashboard uses this instead of static fleet.json.
+      if (url.pathname === '/fleet' && req.method === 'GET') {
+        const servers: Array<Record<string, unknown>> = [
+          {
+            id: 'atm-gw1',
+            name: 'ATM Server',
+            host: '', // empty = same origin (dashboard is served from ATM)
+            environment: currentEnvironment,
+            region: process.env.AWS_REGION || 'us-east-1',
+            ip: process.env.ATM_IP || '34.195.147.149',
+            type: process.env.ATM_INSTANCE_TYPE || 't3.large',
+            role: 'atm',
+          },
+        ];
+
+        // Add GH worker if configured (GH_API_HOST != localhost means remote)
+        if (API_HOST && API_HOST !== 'localhost' && API_HOST !== '127.0.0.1') {
+          servers.push({
+            id: 'gh-worker-1',
+            name: 'GH Worker 1',
+            host: '/fleet/gh-worker-1', // proxy path — dashboard calls ATM, ATM forwards
+            environment: currentEnvironment,
+            region: process.env.AWS_REGION || 'us-east-1',
+            ip: API_HOST,
+            type: process.env.GH_INSTANCE_TYPE || 't3.large',
+            role: 'ghosthands',
+          });
+        }
+
+        return Response.json({ servers });
+      }
+
+      // ── GET /fleet/:id/* — Smart proxy to fleet servers ───────
+      // Intercepts known sub-paths and transforms raw GH responses into
+      // the shapes the ATM dashboard expects (HealthResponse, VersionResponse, etc.).
+      // Falls back to dumb proxy for unknown sub-paths.
+      if (url.pathname.startsWith('/fleet/') && req.method === 'GET') {
+        const rest = url.pathname.slice('/fleet/'.length); // "gh-worker-1/health"
+        const slashIdx = rest.indexOf('/');
+        if (slashIdx === -1) {
+          return Response.json({ error: 'Missing path: /fleet/:id/:endpoint' }, { status: 400 });
+        }
+        const serverId = rest.slice(0, slashIdx);
+        const endpoint = rest.slice(slashIdx); // "/health"
+
+        // Self-proxy for ATM's own server
+        if (serverId === 'atm-gw1') {
+          const selfUrl = new URL(endpoint + url.search, req.url);
+          return handleRequest(new Request(selfUrl.toString(), req));
+        }
+
+        // Resolve GH server
+        if (serverId !== 'gh-worker-1') {
+          return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
+        }
+
+        const ghApiBase = `http://${API_HOST}:${API_PORT}`;
+        const ghWorkerBase = `http://${WORKER_HOST}:${WORKER_PORT}`;
+
+        /** Safe fetch that returns null on failure instead of throwing */
+        const safeFetch = async <T>(url: string): Promise<T | null> => {
+          try {
+            const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+            if (!resp.ok) return null;
+            return (await resp.json()) as T;
+          } catch {
+            return null;
+          }
+        };
+
+        // ── /fleet/:id/health — Aggregate GH API + Worker health ──
+        if (endpoint === '/health') {
+          const [apiHealth, workerHealth, workerStatus] = await Promise.all([
+            safeFetch<{ status: string; service?: string; version?: string }>(
+              `${ghApiBase}/health`,
+            ),
+            safeFetch<{ status: string; active_jobs: number; deploy_safe: boolean }>(
+              `${ghWorkerBase}/worker/health`,
+            ),
+            safeFetch<{ worker_id: string; uptime_ms: number; active_jobs: number }>(
+              `${ghWorkerBase}/worker/status`,
+            ),
+          ]);
+
+          const apiOk = apiHealth?.status === 'ok';
+          const workerOk = !!workerHealth;
+
+          return Response.json({
+            status: apiOk && workerOk ? 'healthy' : apiOk || workerOk ? 'degraded' : 'offline',
+            activeWorkers: workerStatus?.active_jobs ?? workerHealth?.active_jobs ?? 0,
+            deploySafe: workerHealth?.deploy_safe ?? false,
+            apiHealthy: apiOk,
+            workerStatus: workerHealth?.status ?? 'unreachable',
+            currentDeploy: currentDeploy?.imageTag ?? null,
+            uptimeMs: workerStatus?.uptime_ms ?? 0,
+          });
+        }
+
+        // ── /fleet/:id/version — Build VersionResponse from GH API ──
+        if (endpoint === '/version') {
+          const apiHealth = await safeFetch<{
+            status: string;
+            service?: string;
+            version?: string;
+            environment?: string;
+            commit_sha?: string;
+            timestamp?: string;
+          }>(`${ghApiBase}/health`);
+
+          const versionInfo = await safeFetch<{
+            version?: string;
+            commit_sha?: string;
+            build_time?: string;
+            uptime?: number;
+          }>(`${ghApiBase}/health/version`);
+
+          const ghInfo = apiHealth
+            ? {
+                service: apiHealth.service ?? 'ghosthands',
+                environment: apiHealth.environment ?? currentEnvironment,
+                commit_sha: versionInfo?.commit_sha ?? apiHealth.commit_sha ?? 'unknown',
+                image_tag: process.env.ECR_IMAGE || 'unknown',
+                build_time: versionInfo?.build_time ?? apiHealth.timestamp ?? '',
+                uptime_ms: versionInfo?.uptime ?? 0,
+                node_env: apiHealth.environment ?? currentEnvironment,
+              }
+            : { status: 'unreachable' };
+
+          return Response.json({
+            deployServer: 'atm-api',
+            version: apiHealth?.version ?? versionInfo?.version ?? 'unknown',
+            ghosthands: ghInfo,
+            uptimeMs: Date.now() - startedAt,
+          });
+        }
+
+        // ── /fleet/:id/workers — Build Worker[] from GH worker endpoints ──
+        if (endpoint === '/workers') {
+          const [workerHealth, workerStatus] = await Promise.all([
+            safeFetch<{ status: string; active_jobs: number; deploy_safe: boolean }>(
+              `${ghWorkerBase}/worker/health`,
+            ),
+            safeFetch<{
+              worker_id: string;
+              ec2_instance_id?: string;
+              ec2_ip?: string;
+              active_jobs: number;
+              max_concurrent: number;
+              is_running: boolean;
+              is_draining: boolean;
+              uptime_ms: number;
+            }>(`${ghWorkerBase}/worker/status`),
+          ]);
+
+          if (!workerHealth && !workerStatus) {
+            return Response.json([]);
+          }
+
+          const worker = {
+            workerId: workerStatus?.worker_id ?? 'unknown',
+            containerId: workerStatus?.ec2_instance_id ?? '',
+            containerName: 'ghosthands-worker',
+            status: workerHealth?.status ?? (workerStatus?.is_draining ? 'draining' : workerStatus?.is_running ? 'idle' : 'offline'),
+            activeJobs: workerStatus?.active_jobs ?? workerHealth?.active_jobs ?? 0,
+            statusPort: WORKER_PORT,
+            uptime: String(workerStatus?.uptime_ms ?? 0),
+            image: process.env.ECR_IMAGE || 'unknown',
+          };
+
+          return Response.json([worker]);
+        }
+
+        // ── /fleet/:id/metrics — GH has no system metrics endpoint ──
+        if (endpoint === '/metrics') {
+          return Response.json({
+            cpu: { usagePercent: 0, cores: 0 },
+            memory: { usedMb: 0, totalMb: 0, usagePercent: 0 },
+            disk: { usedGb: 0, totalGb: 0, usagePercent: 0 },
+          });
+        }
+
+        // ── /fleet/:id/containers — Can't query Docker on remote GH ──
+        if (endpoint === '/containers') {
+          return Response.json([]);
+        }
+
+        // ── /fleet/:id/deploys — Return ATM's own deploy history ──
+        if (endpoint === '/deploys') {
+          const limit = parseInt(url.searchParams.get('limit') || '50', 10);
+          return Response.json(getRecords(limit));
+        }
+
+        // ── Fallback: dumb proxy for unknown sub-paths ──
+        const workerEndpoints = ['/worker/', '/workers'];
+        const isWorkerEndpoint = workerEndpoints.some((p) => endpoint.startsWith(p));
+        const targetBase = isWorkerEndpoint ? ghWorkerBase : ghApiBase;
+
+        try {
+          const targetUrl = `${targetBase}${endpoint}${url.search}`;
+          const resp = await fetch(targetUrl, { signal: AbortSignal.timeout(10000) });
+          const body = await resp.text();
+          return new Response(body, {
+            status: resp.status,
+            headers: { 'Content-Type': resp.headers.get('Content-Type') || 'application/json' },
+          });
+        } catch (err: any) {
+          return Response.json(
+            { error: `Proxy to ${serverId} failed: ${err.message}` },
+            { status: 502 },
+          );
+        }
+      }
+
       // ── GET /secrets/status — Infisical connection status ──────
       if (url.pathname === '/secrets/status' && req.method === 'GET') {
         const status = await getInfisicalStatus();

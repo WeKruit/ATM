@@ -59,10 +59,14 @@ export default function MetricsPage() {
   const fetchMetrics = useCallback(async () => {
     if (!activeServer) return;
     try {
-      const data = await get<MetricsResponse>('/metrics', base);
-      setMetrics(data);
-      setHistory((prev) => [...prev.slice(-59), data]);
-      setError(null);
+      const data = await get<MetricsResponse>('/metrics', base).catch(() => null);
+      if (data) {
+        setMetrics(data);
+        setHistory((prev) => [...prev.slice(-59), data]);
+        setError(null);
+      } else {
+        setError('Metrics endpoint not available on this server');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch');
     } finally {

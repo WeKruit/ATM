@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { get } from '../api';
 import type { KamalStatus, KamalAuditEntry } from '../api';
-import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 import LogStream from '../components/LogStream';
 import DataTable, { type Column } from '../components/DataTable';
@@ -45,7 +44,7 @@ const auditColumns: Column<KamalAuditEntry>[] = [
 ];
 
 export default function KamalPage() {
-  const { activeServer } = useFleet();
+  // Kamal is global (managed by ATM), always fetch from same origin
   const [status, setStatus] = useState<KamalStatus | null>(null);
   const [audit, setAudit] = useState<KamalAuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,10 +52,9 @@ export default function KamalPage() {
   const [showStream, setShowStream] = useState(false);
   const [deploying, setDeploying] = useState(false);
 
-  const base = activeServer?.host ?? '';
+  const base = '';
 
   const fetchAll = useCallback(async () => {
-    if (!activeServer) return;
     try {
       const [s, a] = await Promise.all([
         get<KamalStatus>('/kamal/status', base),
@@ -70,7 +68,7 @@ export default function KamalPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeServer, base]);
+  }, [base]);
 
   useEffect(() => {
     setLoading(true);
@@ -78,10 +76,6 @@ export default function KamalPage() {
     const interval = setInterval(fetchAll, 15000);
     return () => clearInterval(interval);
   }, [fetchAll]);
-
-  if (!activeServer) {
-    return <div className="text-center py-20 text-gray-500">Select a server to view Kamal status.</div>;
-  }
 
   if (loading) {
     return (
