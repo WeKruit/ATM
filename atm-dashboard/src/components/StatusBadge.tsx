@@ -14,6 +14,13 @@ const colorMap: Record<string, { bg: string; text: string; dot: string }> = {
   available: { bg: 'bg-green-500/10', text: 'text-green-400', dot: 'bg-green-400' },
   true: { bg: 'bg-green-500/10', text: 'text-green-400', dot: 'bg-green-400' },
   yes: { bg: 'bg-green-500/10', text: 'text-green-400', dot: 'bg-green-400' },
+  idle: { bg: 'bg-green-500/10', text: 'text-green-400', dot: 'bg-green-400' },
+  ready: { bg: 'bg-green-500/10', text: 'text-green-400', dot: 'bg-green-400' },
+
+  // Cyan states (active work)
+  active: { bg: 'bg-cyan-500/10', text: 'text-cyan-400', dot: 'bg-cyan-400' },
+  busy: { bg: 'bg-cyan-500/10', text: 'text-cyan-400', dot: 'bg-cyan-400' },
+  processing: { bg: 'bg-cyan-500/10', text: 'text-cyan-400', dot: 'bg-cyan-400' },
 
   // Yellow states
   deploying: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },

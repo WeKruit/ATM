@@ -117,11 +117,23 @@ export default function OverviewPage() {
           value={<StatusBadge status={health?.status ?? 'unknown'} size="md" />}
         />
         <StatCard
-          label="Active Workers"
+          label="Worker"
           value={
-            <span className="text-2xl font-bold tabular-nums text-gray-100">
-              {health?.activeWorkers ?? 0}
-            </span>
+            health?.workerStatus === 'idle' ? (
+              <div>
+                <span className="text-2xl font-bold text-green-400">Ready</span>
+                <p className="text-xs text-gray-500 mt-0.5">Polling for jobs</p>
+              </div>
+            ) : health?.activeWorkers ? (
+              <div>
+                <span className="text-2xl font-bold text-cyan-400">{health.activeWorkers} Active</span>
+                <p className="text-xs text-gray-500 mt-0.5">Processing jobs</p>
+              </div>
+            ) : (
+              <span className="text-2xl font-bold tabular-nums text-gray-100">
+                {health?.activeWorkers ?? 0}
+              </span>
+            )
           }
         />
         <StatCard
@@ -232,9 +244,9 @@ export default function OverviewPage() {
             <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4 flex items-center justify-between">
               <div>
                 <p className="text-sm text-gray-400">GH Worker</p>
-                <p className="text-xs text-gray-600 mt-0.5">Port 3101</p>
+                <p className="text-xs text-gray-600 mt-0.5">Port 3101 {health.workerStatus === 'idle' ? '— awaiting jobs' : ''}</p>
               </div>
-              <StatusBadge status={health.workerStatus} />
+              <StatusBadge status={health.workerStatus === 'idle' ? 'Ready' : health.workerStatus} />
             </div>
           </div>
         </div>
