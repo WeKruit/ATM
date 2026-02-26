@@ -152,6 +152,22 @@ interface FleetServer {
 
 let fleetServers: FleetServer[] = [];
 
+/**
+ * Resolves a path relative to the project root, trying both Docker layout
+ * (import.meta.dir = /app/src → one level up) and local layout
+ * (import.meta.dir = .../atm-api/src → two levels up).
+ */
+function resolveProjectPath(relativePath: string): string | null {
+  const candidates = [
+    path.resolve(import.meta.dir, '..', relativePath),   // Docker: /app/src/../X = /app/X
+    path.resolve(import.meta.dir, '../..', relativePath), // Local: .../atm-api/src/../../X = .../ATM/X
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function loadFleetConfig(): FleetServer[] {
   // Try FLEET_CONFIG env var first (JSON string)
   if (process.env.FLEET_CONFIG) {
@@ -166,13 +182,19 @@ function loadFleetConfig(): FleetServer[] {
   }
 
   // Fall back to fleet.json file
-  try {
-    const configPath = path.resolve(import.meta.dir, '../../atm-dashboard/public/fleet.json');
-    const raw = fs.readFileSync(configPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    fleetServers = parsed.servers || [];
-    console.log(`[atm-api] Loaded ${fleetServers.length} servers from fleet.json`);
-  } catch (e) {
+  const fleetPath = resolveProjectPath('atm-dashboard/public/fleet.json')
+    || resolveProjectPath('config/fleet.json');
+  if (fleetPath) {
+    try {
+      const raw = fs.readFileSync(fleetPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      fleetServers = parsed.servers || [];
+      console.log(`[atm-api] Loaded ${fleetServers.length} servers from ${fleetPath}`);
+    } catch (e) {
+      console.log('[atm-api] Failed to parse fleet.json, using env-based fleet config');
+      fleetServers = [];
+    }
+  } else {
     console.log('[atm-api] No fleet.json found, using env-based fleet config');
     fleetServers = [];
   }
@@ -1308,7 +1330,10 @@ async function handleRequest(req: Request): Promise<Response> {
       // ── GET /kamal/hosts — Hosts per role per destination ─────
       if (url.pathname === '/kamal/hosts' && req.method === 'GET') {
         try {
-          const configDir = path.resolve(import.meta.dir, '../../config');
+          const configDir = resolveProjectPath('config');
+          if (!configDir) {
+            return Response.json({ error: 'Config directory not found' }, { status: 500 });
+          }
           const destinations = ['staging', 'production'];
           const result: Record<string, Record<string, string[]>> = {};
 

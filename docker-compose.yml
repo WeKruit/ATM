@@ -26,6 +26,8 @@ services:
       - ./.kamal:/app/.kamal
       # Dashboard SPA (built locally, served by ATM API)
       - ./atm-dashboard/dist:/app/atm-dashboard/dist:ro
+      # Fleet config (fleet.json read by loadFleetConfig)
+      - ./atm-dashboard/public/fleet.json:/app/atm-dashboard/public/fleet.json:ro
     restart: unless-stopped
     labels:
       atm.service: "api"
