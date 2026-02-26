@@ -10,6 +10,8 @@
  * @module atm-api/src/kamal-runner
  */
 
+import { getInfisicalConfig } from './infisical-client';
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface KamalResult {
@@ -148,6 +150,7 @@ async function consumeStream(
 export async function spawnKamal(
   args: string[],
   onLine?: (line: string) => void,
+  extraEnv?: Record<string, string>,
 ): Promise<KamalResult> {
   const start = Date.now();
   const spawn = getSpawn();
@@ -157,6 +160,7 @@ export async function spawnKamal(
   const proc = spawn(['kamal', ...args], {
     env: {
       ...process.env,
+      ...extraEnv,
       TERM: 'dumb',
     },
     stdout: 'pipe',
@@ -177,10 +181,168 @@ export async function spawnKamal(
   return { exitCode, stdout, stderr, durationMs };
 }
 
+// ── Secrets fetcher for Kamal deploys ────────────────────────────────
+
+/** The secrets Kamal deploy.yml declares under env.secret */
+const KAMAL_SECRET_KEYS = [
+  'GH_ENVIRONMENT',
+  'DATABASE_URL',
+  'DATABASE_DIRECT_URL',
+  'SUPABASE_URL',
+  'SUPABASE_SECRET_KEY',
+  'SUPABASE_PUBLISHABLE_KEY',
+  'REDIS_URL',
+  'GH_SERVICE_SECRET',
+  'GH_DEPLOY_SECRET',
+  'ANTHROPIC_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'S3_ENDPOINT',
+  'S3_ACCESS_KEY',
+  'S3_SECRET_KEY',
+  'S3_REGION',
+  'CORS_ORIGIN',
+  'VALET_DEPLOY_WEBHOOK_SECRET',
+] as const;
+
+/**
+ * Fetches all secrets needed for a Kamal deploy:
+ *  1. KAMAL_REGISTRY_PASSWORD — ECR token via SSH to GH EC2
+ *  2. GH app secrets — from Infisical API (/ghosthands path)
+ *
+ * Maps destination to Infisical environment: staging→staging, production→prod
+ */
+export async function fetchSecretsForKamalDeploy(
+  destination: string,
+): Promise<Record<string, string>> {
+  const env: Record<string, string> = {};
+
+  // 1. Fetch ECR registry password via SSH to GH EC2
+  console.log('[kamal-runner] Fetching ECR token via SSH...');
+  try {
+    const sshProc = Bun.spawn(
+      ['ssh', '-i', '/root/.ssh/gh-deploy-key', '-o', 'StrictHostKeyChecking=no',
+       '-o', 'ConnectTimeout=10', 'ubuntu@44.223.180.11',
+       'aws ecr get-login-password --region us-east-1'],
+      { stdout: 'pipe', stderr: 'pipe' },
+    );
+    const ecrToken = await new Response(sshProc.stdout).text();
+    const sshExit = await sshProc.exited;
+    if (sshExit === 0 && ecrToken.trim()) {
+      env.KAMAL_REGISTRY_PASSWORD = ecrToken.trim();
+      console.log('[kamal-runner] ECR token fetched OK');
+    } else {
+      const sshErr = await new Response(sshProc.stderr).text();
+      throw new Error(`SSH exit=${sshExit}: ${sshErr.slice(0, 200)}`);
+    }
+  } catch (err: any) {
+    console.error(`[kamal-runner] Failed to fetch ECR token: ${err.message}`);
+    throw new Error(`ECR token fetch failed: ${err.message}`);
+  }
+
+  // 2. Fetch GH secrets from Infisical REST API
+  const infisicalConfig = getInfisicalConfig();
+  if (!infisicalConfig) {
+    throw new Error('Infisical not configured — cannot fetch secrets for Kamal deploy');
+  }
+
+  const infisicalEnv = destination === 'production' ? 'prod' : 'staging';
+  console.log(`[kamal-runner] Fetching secrets from Infisical (env=${infisicalEnv}, path=/ghosthands)...`);
+
+  try {
+    // Authenticate with Universal Auth
+    const authRes = await fetch(`${infisicalConfig.siteUrl}/api/v1/auth/universal-auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: infisicalConfig.clientId,
+        clientSecret: infisicalConfig.clientSecret,
+      }),
+    });
+    if (!authRes.ok) {
+      throw new Error(`Auth failed: ${authRes.status} ${await authRes.text()}`);
+    }
+    const authData = (await authRes.json()) as { accessToken: string };
+    const token = authData.accessToken;
+
+    // Fetch all secrets from /ghosthands path in batch
+    const secretsUrl = new URL(`${infisicalConfig.siteUrl}/api/v3/secrets/raw`);
+    secretsUrl.searchParams.set('workspaceId', infisicalConfig.projectId);
+    secretsUrl.searchParams.set('environment', infisicalEnv);
+    secretsUrl.searchParams.set('secretPath', '/ghosthands');
+
+    const secretsRes = await fetch(secretsUrl.toString(), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!secretsRes.ok) {
+      throw new Error(`Secrets fetch failed: ${secretsRes.status} ${await secretsRes.text()}`);
+    }
+
+    const secretsData = (await secretsRes.json()) as {
+      secrets: Array<{ secretKey: string; secretValue: string }>;
+    };
+
+    // Build env map from fetched secrets
+    const secretMap = new Map<string, string>();
+    for (const s of secretsData.secrets || []) {
+      secretMap.set(s.secretKey, s.secretValue);
+    }
+
+    // Map required keys
+    let found = 0;
+    for (const key of KAMAL_SECRET_KEYS) {
+      const val = secretMap.get(key);
+      if (val !== undefined) {
+        env[key] = val;
+        found++;
+      } else {
+        console.warn(`[kamal-runner] Secret "${key}" not found in Infisical /ghosthands`);
+      }
+    }
+
+    // Override GH_ENVIRONMENT to match destination
+    env.GH_ENVIRONMENT = destination === 'production' ? 'production' : 'staging';
+
+    console.log(`[kamal-runner] Fetched ${found}/${KAMAL_SECRET_KEYS.length} secrets from Infisical`);
+  } catch (err: any) {
+    console.error(`[kamal-runner] Infisical secrets fetch failed: ${err.message}`);
+    throw new Error(`Infisical secrets fetch failed: ${err.message}`);
+  }
+
+  return env;
+}
+
 // ── High-level commands ──────────────────────────────────────────────
 
 /**
+ * Writes secrets as plain KEY=VALUE to .kamal/secrets files so Kamal's
+ * dotenv parser can read them. Also passes them as env vars (belt + suspenders).
+ */
+async function writeSecretsFiles(
+  secrets: Record<string, string>,
+  destination: string,
+): Promise<void> {
+  const { KAMAL_REGISTRY_PASSWORD, ...appSecrets } = secrets;
+
+  // .kamal/secrets-common — just the ECR password
+  const commonLines = KAMAL_REGISTRY_PASSWORD
+    ? `KAMAL_REGISTRY_PASSWORD=${KAMAL_REGISTRY_PASSWORD}\n`
+    : '';
+
+  // .kamal/secrets.<destination> — all app secrets
+  const destLines = Object.entries(appSecrets)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n') + '\n';
+
+  await Bun.write('.kamal/secrets-common', commonLines);
+  await Bun.write(`.kamal/secrets.${destination}`, destLines);
+
+  console.log(`[kamal-runner] Wrote secrets files (.kamal/secrets-common + .kamal/secrets.${destination})`);
+}
+
+/**
  * Runs a Kamal deploy for the given destination.
+ * Fetches secrets from Infisical + ECR, writes them to .kamal/secrets files,
+ * and injects them as env vars before spawning Kamal.
  *
  * @param destination - Deploy destination (e.g., 'staging', 'production')
  * @param version - Optional image version/tag to deploy
@@ -191,17 +353,30 @@ export async function kamalDeploy(
   version?: string,
   onLine?: (line: string) => void,
 ): Promise<KamalResult> {
+  // Fetch all secrets and write to files + inject as env vars
+  const secretEnv = await fetchSecretsForKamalDeploy(destination);
+  await writeSecretsFiles(secretEnv, destination);
+
+  // Stop existing containers first (proxy: false + port publishing means
+  // two containers can't bind the same port simultaneously)
+  console.log(`[kamal-runner] Stopping existing containers before deploy...`);
+  await spawnKamal(['app', 'stop', '-d', destination], onLine, secretEnv).catch(() => {
+    console.log('[kamal-runner] No existing containers to stop (or stop failed) — continuing');
+  });
+
   const args = [
     'deploy',
     '-d', destination,
     ...(version ? ['--version', version] : []),
     '-P',
   ];
-  return spawnKamal(args, onLine);
+  return spawnKamal(args, onLine, secretEnv);
 }
 
 /**
  * Runs a Kamal rollback to a specific version.
+ * Fetches secrets from Infisical + ECR, writes them to .kamal/secrets files,
+ * and injects them as env vars before spawning Kamal.
  *
  * @param destination - Deploy destination
  * @param version - Version to roll back to
@@ -212,8 +387,12 @@ export async function kamalRollback(
   version: string,
   onLine?: (line: string) => void,
 ): Promise<KamalResult> {
+  // Fetch all secrets and write to files + inject as env vars
+  const secretEnv = await fetchSecretsForKamalDeploy(destination);
+  await writeSecretsFiles(secretEnv, destination);
+
   const args = ['rollback', version, '-d', destination];
-  return spawnKamal(args, onLine);
+  return spawnKamal(args, onLine, secretEnv);
 }
 
 /**

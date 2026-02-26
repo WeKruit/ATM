@@ -11,21 +11,25 @@ readiness_delay: 7
 servers:
   web:
     hosts: []
-    cmd: bun packages/ghosthands/src/api/server.ts
+    cmd: packages/ghosthands/src/api/server.ts
     labels:
       gh.service: api
       gh.managed: "true"
     options:
-      network: host
+      entrypoint: /usr/local/bin/bun
+      publish:
+        - 3100:3100
     proxy: false
   workers:
     hosts: []
-    cmd: bun packages/ghosthands/src/workers/main.ts
+    cmd: packages/ghosthands/src/workers/main.ts
     labels:
       gh.service: worker
       gh.managed: "true"
     options:
-      network: host
+      entrypoint: /usr/local/bin/bun
+      publish:
+        - 3101:3101
     proxy: false
 
 builder:

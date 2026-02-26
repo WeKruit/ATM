@@ -23,7 +23,7 @@ services:
       - /home/ubuntu/.ssh/gh-deploy-key:/root/.ssh/gh-deploy-key:ro
       # Kamal config + secrets
       - ./config:/app/config:ro
-      - ./.kamal:/app/.kamal:ro
+      - ./.kamal:/app/.kamal
     restart: unless-stopped
     labels:
       atm.service: "api"

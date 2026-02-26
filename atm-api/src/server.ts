@@ -1020,14 +1020,14 @@ async function handleRequest(req: Request): Promise<Response> {
               imageTag,
             });
           } else {
-            const error = result.stderr || `Kamal exited with code ${result.exitCode}`;
+            const error = result.stderr || result.stdout.slice(-500) || `Kamal exited with code ${result.exitCode}`;
             updateRecord(deployRecord.id, {
               status: 'failed',
               completedAt: new Date().toISOString(),
               error,
             });
             deployStream.broadcastComplete(false, error);
-            console.error(`[atm-api] Kamal deploy failed: ${error}`);
+            console.error(`[atm-api] Kamal deploy failed (exit=${result.exitCode}):\nSTDOUT: ${result.stdout.slice(-500)}\nSTDERR: ${result.stderr.slice(-500)}`);
             return Response.json(
               { success: false, error },
               { status: 500 },
