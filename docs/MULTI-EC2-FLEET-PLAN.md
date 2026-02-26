@@ -1,7 +1,7 @@
 # Multi-EC2 Fleet Architecture: 3 Epics Across VALET, ATM, GHOST-HANDS
 
 **Created:** 2026-02-25
-**Status:** P0 complete — Phase 2 next
+**Status:** P0 + P1 complete — deployed to staging 2026-02-26
 
 ### TODO: ATM Dashboard Access (Option B — Security Hardening)
 - Currently: `atm-direct.wekruit.com:8000` bypasses Cloudflare (DNS-only, grey cloud)

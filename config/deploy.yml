@@ -30,6 +30,7 @@ servers:
       entrypoint: /usr/local/bin/bun
       publish:
         - 3101:3101
+        - 6901:6901
     proxy: false
 
 builder:
@@ -72,3 +73,4 @@ env:
     - S3_REGION
     - CORS_ORIGIN
     - VALET_DEPLOY_WEBHOOK_SECRET
+    - SILICONFLOW_API_KEY
