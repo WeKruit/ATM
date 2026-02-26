@@ -24,6 +24,8 @@ services:
       # Kamal config + secrets
       - ./config:/app/config:ro
       - ./.kamal:/app/.kamal
+      # Dashboard SPA (built locally, served by ATM API)
+      - ./atm-dashboard/dist:/app/atm-dashboard/dist:ro
     restart: unless-stopped
     labels:
       atm.service: "api"

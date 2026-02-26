@@ -1134,7 +1134,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /dashboard — Serve static dashboard SPA ────────────
       if (url.pathname === '/dashboard' || url.pathname.startsWith('/dashboard/')) {
-        const dashboardDist = path.resolve(import.meta.dir, '../../atm-dashboard/dist');
+        const dashboardDist = path.resolve(import.meta.dir, '../atm-dashboard/dist');
 
         // Content-Type map for static assets
         const contentTypes: Record<string, string> = {
