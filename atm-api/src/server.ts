@@ -881,13 +881,13 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json([worker]);
         }
 
-        // ── /fleet/:id/metrics — Try GH /monitoring/system, fall back to zeros ──
+        // ── /fleet/:id/metrics — Try GH /health/system, fall back to zeros ──
         if (endpoint === '/metrics') {
           const sysMetrics = await safeFetch<{
             cpu: { usagePercent: number; cores: number };
             memory: { usedMb: number; totalMb: number; usagePercent: number };
             disk: { usedGb: number; totalGb: number; usagePercent: number };
-          }>(`${ghApiBase}/monitoring/system`);
+          }>(`${ghApiBase}/health/system`);
 
           if (sysMetrics) {
             return Response.json(sysMetrics);
