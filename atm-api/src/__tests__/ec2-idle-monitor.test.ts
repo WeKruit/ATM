@@ -117,7 +117,7 @@ describe('pollWorkerHealth', () => {
 
     expect(states[0].activeJobs).toBe(2);
     expect(states[0].lastActiveAt).toBeGreaterThan(1000);
-    expect(states[0].ec2State).toBe('running');
+    expect(states[0].ec2State as string).toBe('running');
   });
 
   it('2: does NOT update lastActiveAt when idle', async () => {
@@ -151,7 +151,7 @@ describe('pollWorkerHealth', () => {
     mockWorkerHealth({});
     await pollWorkerHealth();
 
-    expect(states[0].ec2State).toBe('unknown');
+    expect(states[0].ec2State as string).toBe('unknown');
   });
 
   it('4: handles mixed healthy/unreachable workers', async () => {
@@ -168,9 +168,9 @@ describe('pollWorkerHealth', () => {
     mockWorkerHealth({ '10.0.0.1': { active_jobs: 1 } }); // w2 unreachable
     await pollWorkerHealth();
 
-    expect(states[0].ec2State).toBe('running');
+    expect(states[0].ec2State as string).toBe('running');
     expect(states[0].activeJobs).toBe(1);
-    expect(states[1].ec2State).toBe('unknown');
+    expect(states[1].ec2State as string).toBe('unknown');
   });
 
   it('5: skips non-GH fleet servers', async () => {
@@ -209,7 +209,7 @@ describe('evaluateIdleWorkers', () => {
     await evaluateIdleWorkers();
 
     expect(ec2Calls.some((c) => c.commandType === 'StopInstancesCommand')).toBe(true);
-    expect(states[0].ec2State).toBe('stopping');
+    expect(states[0].ec2State as string).toBe('stopping');
   });
 
   it('7: does not stop worker under timeout', async () => {
@@ -381,7 +381,7 @@ describe('evaluateIdleWorkers', () => {
     // transitioning should be cleared after failure
     expect(states[0].transitioning).toBe(false);
     // ec2State should NOT be changed to 'stopping' on failure
-    expect(states[0].ec2State).toBe('running');
+    expect(states[0].ec2State as string).toBe('running');
   });
 });
 
@@ -437,7 +437,7 @@ describe('start', () => {
 
     const w1 = states.find((s) => s.serverId === 'w1')!;
     expect(w1.instanceId).toBe('i-resolved-0'); // From mock describeInstancesByIps
-    expect(w1.ec2State).toBe('running');
+    expect(w1.ec2State as string).toBe('running');
 
     const w2 = states.find((s) => s.serverId === 'w2')!;
     expect(w2.instanceId).toBe('i-preset');

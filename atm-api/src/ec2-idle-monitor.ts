@@ -32,7 +32,7 @@ export interface WorkerIdleState {
   instanceId: string | null;
   lastActiveAt: number;
   activeJobs: number;
-  ec2State: 'running' | 'stopped' | 'stopping' | 'pending' | 'unknown';
+  ec2State: 'running' | 'stopped' | 'stopping' | 'pending' | 'shutting-down' | 'terminated' | 'unknown';
   transitioning: boolean;
 }
 

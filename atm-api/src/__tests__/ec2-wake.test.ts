@@ -125,7 +125,7 @@ describe('wake logic', () => {
     );
 
     const states = idleMonitor.getWorkerStates();
-    expect(states[0].ec2State).toBe('running');
+    expect(states[0].ec2State as string).toBe('running');
     // Server would return already_running here
   });
 
@@ -154,7 +154,7 @@ describe('wake logic', () => {
     idleMonitor.markActive('w1');
     idleMonitor.markTransitioning('w1', false);
 
-    expect(worker.ec2State).toBe('pending');
+    expect(worker.ec2State as string).toBe('pending');
     expect(worker.transitioning).toBe(false);
   });
 
@@ -206,7 +206,7 @@ describe('wake logic', () => {
     idleMonitor.updateWorkerEc2('w1', 'running', '44.223.180.11');
     idleMonitor.markTransitioning('w1', false);
 
-    expect(worker.ec2State).toBe('running');
+    expect(worker.ec2State as string).toBe('running');
     expect(worker.transitioning).toBe(false);
     // Server would return started_unhealthy after health timeout
   });
@@ -291,7 +291,7 @@ describe('stop logic', () => {
     );
 
     const worker = idleMonitor.getWorkerStates()[0];
-    expect(worker.ec2State).toBe('running');
+    expect(worker.ec2State as string).toBe('running');
     expect(worker.activeJobs).toBe(0);
 
     // Simulate the stop flow that server.ts does
@@ -305,7 +305,7 @@ describe('stop logic', () => {
     idleMonitor.updateWorkerEc2('w1', 'stopping');
     idleMonitor.markTransitioning('w1', false);
 
-    expect(worker.ec2State).toBe('stopping');
+    expect(worker.ec2State as string).toBe('stopping');
     expect(worker.transitioning).toBe(false);
   });
 });
