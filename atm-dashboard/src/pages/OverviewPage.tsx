@@ -1,7 +1,7 @@
 import type React from 'react';
 import { useEffect, useState, useCallback } from 'react';
-import { get } from '../api';
-import type { HealthResponse, MetricsResponse, VersionResponse, GhVersionInfo } from '../api';
+import { get, post } from '../api';
+import type { HealthResponse, MetricsResponse, VersionResponse, GhVersionInfo, IdleStatusResponse, IdleStatusWorker } from '../api';
 import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 
@@ -41,22 +41,36 @@ export default function OverviewPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [version, setVersion] = useState<VersionResponse | null>(null);
+  const [idleStatus, setIdleStatus] = useState<IdleStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ec2ActionLoading, setEc2ActionLoading] = useState(false);
+  const [ec2ActionError, setEc2ActionError] = useState<string | null>(null);
 
   const base = activeServer?.host ?? '';
+  const isGh = activeServer?.role === 'ghosthands';
 
   const fetchAll = useCallback(async () => {
     if (!activeServer) return;
     try {
-      const [h, m, v] = await Promise.all([
+      const fetches: Promise<unknown>[] = [
         get<HealthResponse>('/health', base).catch(() => null),
         get<MetricsResponse>('/metrics', base).catch(() => null),
         get<VersionResponse>('/version', base).catch(() => null),
-      ]);
+      ];
+      // Fetch idle-status for GH workers (always from ATM origin, not proxied)
+      if (isGh) {
+        fetches.push(
+          get<IdleStatusResponse>('/fleet/idle-status').catch(() => null),
+        );
+      }
+      const [h, m, v, idle] = await Promise.all(fetches) as [
+        HealthResponse | null, MetricsResponse | null, VersionResponse | null, IdleStatusResponse | null
+      ];
       setHealth(h);
       setMetrics(m);
       setVersion(v);
+      if (isGh) setIdleStatus(idle);
       // Only show error if health (the primary endpoint) failed
       setError(h ? null : 'Server health endpoint unreachable');
     } catch (err) {
@@ -64,7 +78,7 @@ export default function OverviewPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeServer, base]);
+  }, [activeServer, base, isGh]);
 
   useEffect(() => {
     setLoading(true);
@@ -166,6 +180,35 @@ export default function OverviewPage() {
           }
         />
       </div>
+
+      {/* EC2 Instance Controls — GH workers only */}
+      {isGh && <Ec2Panel
+        serverId={activeServer?.id ?? ''}
+        idleStatus={idleStatus}
+        actionLoading={ec2ActionLoading}
+        actionError={ec2ActionError}
+        onAction={async (action) => {
+          const secret = sessionStorage.getItem('atm-deploy-secret') || '';
+          if (!secret) {
+            setEc2ActionError('Set deploy secret on Kamal page first');
+            return;
+          }
+          setEc2ActionLoading(true);
+          setEc2ActionError(null);
+          try {
+            const endpoint = action === 'start'
+              ? `/fleet/${activeServer!.id}/wake`
+              : `/fleet/${activeServer!.id}/stop`;
+            await post(endpoint, {}, secret);
+            // Refresh after a brief delay to let state propagate
+            setTimeout(fetchAll, 2000);
+          } catch (err) {
+            setEc2ActionError(err instanceof Error ? err.message : `${action} failed`);
+          } finally {
+            setEc2ActionLoading(false);
+          }
+        }}
+      />}
 
       {/* Current Deploy */}
       {health?.currentDeploy && (
@@ -280,5 +323,165 @@ function StatCard({ label, value }: { label: string; value: React.ReactNode }) {
       <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">{label}</p>
       {value}
     </div>
+  );
+}
+
+// ── EC2 Instance Panel ──────────────────────────────────────────────
+
+function Ec2Panel({
+  serverId,
+  idleStatus,
+  actionLoading,
+  actionError,
+  onAction,
+}: {
+  serverId: string;
+  idleStatus: IdleStatusResponse | null;
+  actionLoading: boolean;
+  actionError: string | null;
+  onAction: (action: 'start' | 'stop') => void;
+}) {
+  const worker = idleStatus?.workers?.find((w: IdleStatusWorker) => w.serverId === serverId) ?? null;
+  const ec2State = worker?.ec2State ?? 'unknown';
+  const isStopped = ec2State === 'stopped';
+  const isRunning = ec2State === 'running';
+  const isStopping = ec2State === 'stopping';
+  const isPending = ec2State === 'pending';
+  const activeJobs = worker?.activeJobs ?? 0;
+  const secret = sessionStorage.getItem('atm-deploy-secret') || '';
+
+  if (!idleStatus?.enabled) {
+    return (
+      <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-2">EC2 Instance</h2>
+        <p className="text-xs text-gray-500">Idle monitor not enabled</p>
+      </div>
+    );
+  }
+
+  // Border color based on state
+  const borderColor = isStopped
+    ? 'border-gray-700'
+    : isStopping || isPending
+      ? 'border-yellow-500/30'
+      : isRunning
+        ? 'border-green-500/30'
+        : 'border-gray-800';
+
+  return (
+    <div className={`rounded-lg border ${borderColor} bg-gray-900/50 p-4`}>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">EC2 Instance</h2>
+        <StatusBadge status={ec2State} size="md" />
+      </div>
+
+      {/* State-specific messages */}
+      {isStopping && (
+        <div className="flex items-center gap-2 text-yellow-400 text-sm mb-3 animate-pulse">
+          <Spinner />
+          Shutting down EC2 instance...
+        </div>
+      )}
+
+      {isPending && (
+        <div className="flex items-center gap-2 text-yellow-400 text-sm mb-3 animate-pulse">
+          <Spinner />
+          Starting EC2 instance...
+        </div>
+      )}
+
+      {isStopped && (
+        <div className="flex items-center gap-2 text-gray-400 text-sm mb-3">
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
+          </svg>
+          Instance is stopped. Start it to resume processing jobs.
+        </div>
+      )}
+
+      {/* Idle timer */}
+      {isRunning && idleStatus?.config && worker && activeJobs === 0 && (
+        <div className="mb-3">
+          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span>Idle timer</span>
+            <span className="tabular-nums">
+              {Math.round(worker.idleSinceMs / 60000)}m / {Math.round(idleStatus.config.idleTimeoutMs / 60000)}m until auto-stop
+            </span>
+          </div>
+          <div className="h-2 rounded-full bg-gray-800 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-yellow-500/60 transition-all duration-1000"
+              style={{ width: `${Math.min(100, (worker.idleSinceMs / idleStatus.config.idleTimeoutMs) * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Instance details */}
+      {worker && (
+        <div className="grid grid-cols-3 gap-4 text-xs mb-3">
+          <div>
+            <span className="text-gray-500">Instance ID</span>
+            <p className="font-mono text-gray-300 mt-0.5">{worker.instanceId ?? 'N/A'}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Public IP</span>
+            <p className="font-mono text-gray-300 mt-0.5">{worker.ip}</p>
+          </div>
+          <div>
+            <span className="text-gray-500">Active Jobs</span>
+            <p className={`font-mono mt-0.5 ${activeJobs > 0 ? 'text-cyan-400 font-bold' : 'text-gray-300'}`}>{activeJobs}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Action buttons */}
+      {!isStopping && !isPending && (
+        <div className="flex items-center gap-3 pt-2 border-t border-gray-800">
+          {isStopped && (
+            <button
+              onClick={() => onAction('start')}
+              disabled={actionLoading || !secret}
+              className="px-4 py-1.5 text-sm font-medium rounded-lg bg-green-600/20 text-green-400 border border-green-500/30 hover:bg-green-600/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {actionLoading ? (
+                <span className="flex items-center gap-1.5"><Spinner /> Starting...</span>
+              ) : (
+                'Start EC2'
+              )}
+            </button>
+          )}
+          {isRunning && activeJobs === 0 && (
+            <button
+              onClick={() => onAction('stop')}
+              disabled={actionLoading || !secret}
+              className="px-4 py-1.5 text-sm font-medium rounded-lg bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {actionLoading ? (
+                <span className="flex items-center gap-1.5"><Spinner /> Stopping...</span>
+              ) : (
+                'Stop EC2'
+              )}
+            </button>
+          )}
+          {isRunning && activeJobs > 0 && (
+            <span className="text-xs text-gray-500">Worker has active jobs -- drain before stopping</span>
+          )}
+          {!secret && (isStopped || isRunning) && (
+            <span className="text-xs text-gray-600">Enter deploy secret on Kamal tab to enable controls</span>
+          )}
+          {actionError && <span className="text-xs text-red-400">{actionError}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
   );
 }

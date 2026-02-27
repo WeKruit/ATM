@@ -149,3 +149,21 @@ export interface KamalAuditEntry {
   performer: string;
   details: string;
 }
+
+// ── EC2 idle monitor types ──────────────────────────────────────
+
+export interface IdleStatusWorker {
+  serverId: string;
+  ip: string;
+  instanceId: string | null;
+  ec2State: string;
+  activeJobs: number;
+  idleSinceMs: number;
+  transitioning: boolean;
+}
+
+export interface IdleStatusResponse {
+  enabled: boolean;
+  config: { idleTimeoutMs: number; minRunning: number; pollIntervalMs: number };
+  workers: IdleStatusWorker[];
+}

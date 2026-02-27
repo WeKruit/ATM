@@ -1259,6 +1259,38 @@ group12_vnc() {
   else skip "Multi-EC2 not enabled"; fi
 }
 
+group13_ec2_self_protection() {
+  log_header "Group 13: EC2 Self-Protection"
+
+  CURRENT_TEST="13.1"; log_test "13.1" "POST /fleet/atm-gw1/wake rejects non-GH (400)"
+  local wake_code wake_body
+  wake_body=$(mktemp)
+  wake_code=$(curl -sf -o "$wake_body" -w '%{http_code}' --max-time 15 \
+    -X POST -H "X-Deploy-Secret: ${ATM_DEPLOY_SECRET}" \
+    "${ATM_API}/fleet/atm-gw1/wake" 2>/dev/null) || \
+  wake_code=$(curl -so "$wake_body" -w '%{http_code}' --max-time 15 \
+    -X POST -H "X-Deploy-Secret: ${ATM_DEPLOY_SECRET}" \
+    "${ATM_API}/fleet/atm-gw1/wake" 2>/dev/null) || wake_code="000"
+  if [[ "$wake_code" == "400" ]]; then pass "400 — cannot wake non-GH server"
+  elif [[ "$wake_code" == "404" ]]; then pass "404 — atm-gw1 not in fleet (safe)"
+  else fail "Expected 400/404, got $wake_code: $(cat "$wake_body" 2>/dev/null)"; fi
+  rm -f "$wake_body"
+
+  CURRENT_TEST="13.2"; log_test "13.2" "POST /fleet/atm-gw1/stop rejects non-GH (400)"
+  local stop_code stop_body
+  stop_body=$(mktemp)
+  stop_code=$(curl -sf -o "$stop_body" -w '%{http_code}' --max-time 15 \
+    -X POST -H "X-Deploy-Secret: ${ATM_DEPLOY_SECRET}" \
+    "${ATM_API}/fleet/atm-gw1/stop" 2>/dev/null) || \
+  stop_code=$(curl -so "$stop_body" -w '%{http_code}' --max-time 15 \
+    -X POST -H "X-Deploy-Secret: ${ATM_DEPLOY_SECRET}" \
+    "${ATM_API}/fleet/atm-gw1/stop" 2>/dev/null) || stop_code="000"
+  if [[ "$stop_code" == "400" ]]; then pass "400 — cannot stop non-GH server"
+  elif [[ "$stop_code" == "404" ]]; then pass "404 — atm-gw1 not in fleet (safe)"
+  else fail "Expected 400/404, got $stop_code: $(cat "$stop_body" 2>/dev/null)"; fi
+  rm -f "$stop_body"
+}
+
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -1364,6 +1396,8 @@ main() {
       group12_vnc
     fi
   fi
+
+  if should_run_group 13; then group13_ec2_self_protection; fi
 
   # ── Summary ──────────────────────────────────────────────────────────────
 

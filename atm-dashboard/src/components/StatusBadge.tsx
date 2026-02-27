@@ -27,6 +27,12 @@ const colorMap: Record<string, { bg: string; text: string; dot: string }> = {
   in_progress: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
   paused: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
   locked: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
+  stopping: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
+  pending: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
+  waking: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
+
+  // Gray states
+  stopped: { bg: 'bg-gray-500/10', text: 'text-gray-400', dot: 'bg-gray-400' },
 
   // Red states
   failed: { bg: 'bg-red-500/10', text: 'text-red-400', dot: 'bg-red-400' },
