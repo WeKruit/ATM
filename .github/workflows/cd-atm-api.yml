@@ -26,7 +26,14 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
-            - name: Sync source to EC2
+            - uses: oven-sh/setup-bun@v2
+
+            - name: Build dashboard for EC2
+              run: |
+                  cd atm-dashboard && bun install --frozen-lockfile
+                  VITE_BASE=/dashboard/ bunx vite build
+
+            - name: Sync source + dashboard dist to EC2
               env:
                   EC2_HOST: ${{ secrets.EC2_HOST }}
                   EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
@@ -34,7 +41,7 @@ jobs:
                   echo "$EC2_SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
                   rsync -az --delete \
                     -e "ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no" \
-                    --exclude='.git' --exclude='node_modules' --exclude='dist' \
+                    --exclude='.git' --exclude='node_modules' \
                     --exclude='.env' --exclude='data' \
                     ./ ubuntu@${EC2_HOST}:/opt/atm/
                   rm -f /tmp/deploy_key
