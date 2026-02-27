@@ -631,19 +631,32 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /health — Unauthenticated health check ──────────
       if (url.pathname === '/health' && req.method === 'GET') {
-        const apiHealth = await fetchJson(`http://${API_HOST}:${API_PORT}/health`);
-        const workerHealth = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/health`);
-        const workerStatus = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/status`);
+        // Check if any GH worker is running (skip health probes to stopped/standby workers)
+        const workerStates = idleMonitor.getWorkerStates();
+        const anyRunning = workerStates.some(w => w.ec2State === 'running');
+
+        let apiHealth: Record<string, unknown> | null = null;
+        let workerHealth: Record<string, unknown> | null = null;
+        let workerStatus: Record<string, unknown> | null = null;
+
+        if (anyRunning) {
+          // Find a running worker to probe
+          const running = workerStates.find(w => w.ec2State === 'running');
+          const probeIp = running?.ip ?? API_HOST;
+          apiHealth = await fetchJson(`http://${probeIp}:${API_PORT}/health`);
+          workerHealth = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/health`);
+          workerStatus = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/status`);
+        }
 
         const activeWorkers = (workerStatus?.active_jobs as number) ?? 0;
         const deploySafe = (workerHealth?.deploy_safe as boolean) ?? (activeWorkers === 0);
 
         return Response.json({
-          status: apiHealth ? 'ok' : 'degraded',
+          status: anyRunning ? (apiHealth ? 'ok' : 'degraded') : 'idle',
           activeWorkers,
           deploySafe,
-          apiHealthy: !!apiHealth,
-          workerStatus: workerHealth?.status ?? 'unknown',
+          apiHealthy: anyRunning ? !!apiHealth : false,
+          workerStatus: anyRunning ? (workerHealth?.status ?? 'unknown') : 'all-stopped',
           currentDeploy: currentDeploy
             ? { imageTag: currentDeploy.imageTag, elapsedMs: Date.now() - currentDeploy.startedAt }
             : null,
@@ -1174,7 +1187,26 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
         }
 
-        const serverIp = fleetEntry.ip;
+        // Fast-return for stopped/standby workers (avoids 8s timeout probing unreachable hosts)
+        const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
+        if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
+          if (endpoint === '/health') {
+            return Response.json({
+              status: 'offline',
+              activeWorkers: 0,
+              deploySafe: false,
+              apiHealthy: false,
+              workerStatus: 'unreachable',
+              currentDeploy: null,
+              uptimeMs: 0,
+            });
+          }
+          if (endpoint === '/metrics') {
+            return Response.json({ error: 'Instance is ' + workerState.ec2State, status: workerState.ec2State });
+          }
+        }
+
+        const serverIp = workerState?.ip ?? fleetEntry.ip;
         const ghApiBase = `http://${serverIp}:${API_PORT}`;
         const ghWorkerBase = `http://${serverIp}:${WORKER_PORT}`;
 

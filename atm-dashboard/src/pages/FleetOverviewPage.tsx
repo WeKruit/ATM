@@ -28,8 +28,8 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
         (async () => {
           try {
             const [healthRes, metricsRes] = await Promise.all([
-              fetch(`${s.host}/health`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null).catch(() => null),
-              fetch(`${s.host}/metrics`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok ? r.json() : null).catch(() => null),
+              fetch(`${s.host}/health`, { signal: AbortSignal.timeout(10000) }).then((r) => r.ok ? r.json() : null).catch(() => null),
+              fetch(`${s.host}/metrics`, { signal: AbortSignal.timeout(10000) }).then((r) => r.ok ? r.json() : null).catch(() => null),
             ]);
             results[s.id] = { health: healthRes, metrics: metricsRes, reachable: !!healthRes };
           } catch {
@@ -41,7 +41,7 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
 
     // Fetch idle-status from ATM (same origin)
     fetches.push(
-      fetch('/fleet/idle-status', { signal: AbortSignal.timeout(5000) })
+      fetch('/fleet/idle-status', { signal: AbortSignal.timeout(10000) })
         .then((r) => r.ok ? r.json() : null)
         .then((data) => setIdleStatus(data))
         .catch(() => setIdleStatus(null)),
