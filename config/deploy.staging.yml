@@ -7,10 +7,12 @@
 servers:
   web:
     hosts:
-      - 44.223.180.11
+      - 44.223.180.11       # gh-worker-1
+      - 35.170.51.196       # gh-worker-2
   workers:
     hosts:
-      - 44.223.180.11
+      - 44.223.180.11       # gh-worker-1
+      - 35.170.51.196       # gh-worker-2
 
 env:
   clear:
