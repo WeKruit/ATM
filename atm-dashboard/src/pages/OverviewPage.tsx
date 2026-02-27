@@ -343,9 +343,9 @@ function Ec2Panel({
 }) {
   const worker = idleStatus?.workers?.find((w: IdleStatusWorker) => w.serverId === serverId) ?? null;
   const ec2State = worker?.ec2State ?? 'unknown';
-  const isStopped = ec2State === 'stopped';
+  const isStopped = ec2State === 'stopped' || ec2State === 'standby' || ec2State === 'terminated';
   const isRunning = ec2State === 'running';
-  const isStopping = ec2State === 'stopping';
+  const isStopping = ec2State === 'stopping' || ec2State === 'shutting-down';
   const isPending = ec2State === 'pending';
   const activeJobs = worker?.activeJobs ?? 0;
   const secret = sessionStorage.getItem('atm-deploy-secret') || '';
@@ -447,7 +447,7 @@ function Ec2Panel({
               {actionLoading ? (
                 <span className="flex items-center gap-1.5"><Spinner /> Starting...</span>
               ) : (
-                'Start EC2'
+                'Wake Worker'
               )}
             </button>
           )}

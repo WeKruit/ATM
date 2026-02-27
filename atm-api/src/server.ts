@@ -1187,23 +1187,19 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
         }
 
-        // Fast-return for stopped/standby workers (avoids 8s timeout probing unreachable hosts)
+        // Fast-return for ALL endpoints when worker is stopped/standby (avoids timeout probing unreachable hosts)
         const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
         if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
-          if (endpoint === '/health') {
-            return Response.json({
-              status: 'offline',
-              activeWorkers: 0,
-              deploySafe: false,
-              apiHealthy: false,
-              workerStatus: 'unreachable',
-              currentDeploy: null,
-              uptimeMs: 0,
-            });
-          }
-          if (endpoint === '/metrics') {
-            return Response.json({ error: 'Instance is ' + workerState.ec2State, status: workerState.ec2State });
-          }
+          return Response.json({
+            status: 'offline',
+            ec2State: workerState.ec2State,
+            activeWorkers: 0,
+            deploySafe: false,
+            apiHealthy: false,
+            workerStatus: 'unreachable',
+            currentDeploy: null,
+            uptimeMs: 0,
+          });
         }
 
         const serverIp = workerState?.ip ?? fleetEntry.ip;

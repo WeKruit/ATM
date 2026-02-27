@@ -286,7 +286,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
                   <Spinner /> Starting...
                 </span>
               ) : (
-                'Start EC2'
+                'Wake Worker'
               )}
             </button>
           )}
@@ -306,7 +306,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
             </button>
           )}
           {!secret && (isStopped || isRunning) && (
-            <span className="text-xs text-gray-600">Set secret on Kamal page</span>
+            <span className="text-xs text-gray-600">Enter deploy secret on Kamal tab first</span>
           )}
           {actionError && <span className="text-xs text-red-400">{actionError}</span>}
         </div>
