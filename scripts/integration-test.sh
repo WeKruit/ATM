@@ -35,7 +35,7 @@ VALET_API="https://valet-api-stg.fly.dev"
 GH_API="http://44.223.180.11:3100"
 GH_WORKER="http://44.223.180.11:3101"
 ATM_API="${ATM_API:-https://atm-gw1.wekruit.com}"
-ATM_DIRECT="http://34.195.147.149:8080"
+ATM_DIRECT="http://atm-direct.wekruit.com:8080"
 VNC_URL="https://44.223.180.11:6901"
 
 # 2nd GH EC2 (set when provisioned, Phase D)
