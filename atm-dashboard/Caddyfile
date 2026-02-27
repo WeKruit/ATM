@@ -1,8 +1,27 @@
 :8080 {
-	# SPA static files — serve built dashboard assets
-	# API requests go directly from browser to EC2 servers (CORS)
-	root * /srv
-	try_files {path} /index.html
-	file_server
-	encode gzip
+	# API routes → reverse proxy to EC2 ATM backend
+	@api {
+		path /health
+		path /metrics
+		path /fleet
+		path /fleet/*
+		path /containers
+		path /workers
+		path /version
+		path /deploy/*
+		path /rollback/*
+		path /kamal/*
+		path /secrets/*
+	}
+	handle @api {
+		reverse_proxy {$ATM_API_URL}
+	}
+
+	# Everything else → SPA static files
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+		encode gzip
+	}
 }
