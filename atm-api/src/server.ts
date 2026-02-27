@@ -73,6 +73,7 @@ import { getRecords, getRecord, createDeployRecord, updateRecord } from './deplo
 import { executeRollback } from './rollback';
 import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue } from './infisical-client';
 import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal } from './kamal-runner';
+import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
 import path from 'node:path';
 
@@ -1464,6 +1465,28 @@ async function handleRequest(req: Request): Promise<Response> {
         const imageTag = version || 'latest';
 
         console.log(`[atm-api] Kamal deploy requested: destination=${destination}, version=${version ?? 'latest'}`);
+
+        // Pre-deploy drain check (skip if ?force=true)
+        const force = url.searchParams.get('force') === 'true';
+        if (!force) {
+          console.log('[atm-api] Running pre-deploy drain check...');
+          const drainError = await preDeployDrain(
+            fleetServers,
+            WORKER_PORT,
+            WORKER_HOST,
+            {
+              timeoutMs: 300_000,
+              onLine: (line) => deployStream.broadcastLine(line),
+            },
+          );
+          if (drainError) {
+            console.log(`[atm-api] Pre-deploy drain failed: ${drainError}`);
+            return Response.json(
+              { success: false, message: drainError },
+              { status: 503 },
+            );
+          }
+        }
 
         currentDeploy = {
           imageTag,

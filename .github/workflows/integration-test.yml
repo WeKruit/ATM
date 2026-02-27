@@ -1,0 +1,49 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+    inputs:
+      group:
+        description: 'Run specific test group (1-12)'
+        required: false
+        type: string
+      all:
+        description: 'Run all groups including task lifecycle + drain'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  integration-tests:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      ATM_DEPLOY_SECRET: ${{ secrets.ATM_DEPLOY_SECRET }}
+      ATM_API: https://atm-gw1.wekruit.com
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq postgresql-client
+
+      - name: Run integration tests
+        run: |
+          # Determine flags based on trigger
+          FLAGS="--ci"
+
+          if [[ "${{ inputs.all }}" == "true" ]]; then
+            FLAGS="--all"
+          elif [[ -n "${{ inputs.group }}" ]]; then
+            FLAGS="--group=${{ inputs.group }}"
+          fi
+
+          echo "Running: bash scripts/integration-test.sh $FLAGS"
+          bash scripts/integration-test.sh $FLAGS
