@@ -225,7 +225,7 @@ export default function OverviewPage() {
       )}
 
       {/* Metrics */}
-      {metrics && (
+      {metrics?.cpu && metrics?.memory && metrics?.disk && (
         <div>
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">System Resources</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

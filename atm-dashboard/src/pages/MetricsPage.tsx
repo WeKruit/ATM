@@ -139,7 +139,7 @@ export default function MetricsPage() {
       </div>
 
       {/* Gauge cards */}
-      {metrics && (
+      {metrics?.cpu && metrics?.memory && metrics?.disk && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <MetricCard label="CPU Usage" percent={metrics.cpu.usagePercent} primary={`${metrics.cpu.usagePercent.toFixed(1)}%`} secondary={`${metrics.cpu.cores} cores`} />
           <MetricCard label="Memory" percent={metrics.memory.usagePercent} primary={`${metrics.memory.usedMb} / ${metrics.memory.totalMb} MB`} secondary={`${(metrics.memory.totalMb - metrics.memory.usedMb)} MB free`} />
@@ -154,9 +154,9 @@ export default function MetricsPage() {
             Recent Trend ({history.length} samples)
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <SparklineCard label="CPU" data={history.map((m) => m.cpu.usagePercent)} />
-            <SparklineCard label="Memory" data={history.map((m) => m.memory.usagePercent)} />
-            <SparklineCard label="Disk" data={history.map((m) => m.disk.usagePercent)} />
+            <SparklineCard label="CPU" data={history.filter((m) => m.cpu).map((m) => m.cpu.usagePercent)} />
+            <SparklineCard label="Memory" data={history.filter((m) => m.memory).map((m) => m.memory.usagePercent)} />
+            <SparklineCard label="Disk" data={history.filter((m) => m.disk).map((m) => m.disk.usagePercent)} />
           </div>
         </div>
       )}
