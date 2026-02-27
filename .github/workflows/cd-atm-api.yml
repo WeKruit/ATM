@@ -24,18 +24,43 @@ jobs:
         timeout-minutes: 10
 
         steps:
+            - uses: actions/checkout@v4
+
             - name: Deploy ATM API + Dashboard
+              uses: appleboy/ssh-action@v1
+              env:
+                  REPO_TAR: /tmp/atm-deploy.tar.gz
+              with:
+                  host: ${{ secrets.EC2_HOST }}
+                  username: ubuntu
+                  key: ${{ secrets.EC2_SSH_KEY }}
+                  envs: REPO_TAR
+                  script_stop: true
+                  script: |
+                      echo "Waiting for repo archive..."
+
+            - name: Sync source to EC2
+              env:
+                  EC2_HOST: ${{ secrets.EC2_HOST }}
+                  EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+              run: |
+                  echo "$EC2_SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+                  rsync -az --delete \
+                    -e "ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no" \
+                    --exclude='.git' --exclude='node_modules' --exclude='dist' \
+                    ./ ubuntu@${EC2_HOST}:/opt/atm/
+                  rm -f /tmp/deploy_key
+
+            - name: Rebuild and restart
               uses: appleboy/ssh-action@v1
               with:
                   host: ${{ secrets.EC2_HOST }}
                   username: ubuntu
                   key: ${{ secrets.EC2_SSH_KEY }}
+                  script_stop: true
                   script: |
                       cd /opt/atm
-                      git pull origin main
-                      # Rebuild dashboard (bind-mounted into container at /app/atm-dashboard/dist)
-                      cd atm-dashboard && bun install --frozen-lockfile && bunx vite build && cd ..
-                      # Rebuild and restart API container
+                      # Rebuild and restart API container (source baked into image)
                       docker compose build atm-api
                       docker compose up -d atm-api
                       sleep 3

@@ -84,15 +84,24 @@ export async function start(
   const withId = ghServers.filter((s) => s.ec2InstanceId);
   const withoutId = ghServers.filter((s) => !s.ec2InstanceId);
 
-  // Initialize servers that already have instance IDs
+  // Initialize servers that already have instance IDs — describe to get actual EC2 state
   for (const server of withId) {
+    let ec2State: WorkerIdleState['ec2State'] = 'unknown';
+    let ip = server.ip;
+    try {
+      const info = await describeInstance(server.ec2InstanceId!);
+      ec2State = info.state === 'running' ? 'running' : info.state as WorkerIdleState['ec2State'];
+      if (info.publicIp) ip = info.publicIp;
+    } catch (err) {
+      console.warn(`[idle-monitor] Failed to describe ${server.id} (${server.ec2InstanceId}):`, err);
+    }
     workerStates.set(server.id, {
       serverId: server.id,
-      ip: server.ip,
+      ip,
       instanceId: server.ec2InstanceId!,
       lastActiveAt: now,
       activeJobs: 0,
-      ec2State: 'running',
+      ec2State,
       transitioning: false,
       asgName: null,
       inStandby: false,
