@@ -260,7 +260,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
         </div>
       )}
 
-      {reachable && metrics && (
+      {reachable && metrics?.cpu && metrics?.memory && metrics?.disk && (
         <div className="space-y-1.5">
           <MiniBar label="CPU" percent={metrics.cpu.usagePercent} />
           <MiniBar label="MEM" percent={metrics.memory.usagePercent} />
