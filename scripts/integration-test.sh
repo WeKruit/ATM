@@ -451,9 +451,6 @@ group3_valet_admin() {
       else
         pass "HTTP 200 (checking response shape)"
       fi
-    elif [[ "$HTTP_CODE" == "502" || "$HTTP_CODE" == "504" ]]; then
-      # Known issue: deep health probes ATM port on GH EC2 (VALET#74)
-      pass "HTTP $HTTP_CODE (known: VALET#74 — metrics proxy hits wrong EC2)"
     else
       fail "HTTP $HTTP_CODE"
     fi
@@ -537,9 +534,6 @@ group3_valet_admin() {
     local stuck
     stuck=$(echo "$HTTP_BODY" | jq '.count // (if type == "array" then length else (.tasks // .data // []) | length end)' 2>/dev/null || echo "?")
     pass "$stuck stuck"
-  elif [[ "$HTTP_CODE" == "500" ]]; then
-    # Known issue: Date type mismatch in stale task reconciliation (VALET#75)
-    pass "HTTP 500 (known: VALET#75 — Date vs string type crash)"
   else
     fail "HTTP $HTTP_CODE"
   fi
