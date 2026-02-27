@@ -123,7 +123,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
 
   const isGh = server.role === 'ghosthands';
   const ec2State = idleWorker?.ec2State ?? null;
-  const isStopped = ec2State === 'stopped' || ec2State === 'terminated';
+  const isStopped = ec2State === 'stopped' || ec2State === 'terminated' || ec2State === 'standby';
   const isRunning = ec2State === 'running';
   const isStopping = ec2State === 'stopping' || ec2State === 'shutting-down';
   const isPending = ec2State === 'pending';
@@ -229,7 +229,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
           </svg>
-          EC2 instance {ec2State === 'terminated' ? 'terminated' : 'stopped'}
+          EC2 instance {ec2State === 'terminated' ? 'terminated' : ec2State === 'standby' ? 'in standby' : 'stopped'}
         </div>
       )}
 

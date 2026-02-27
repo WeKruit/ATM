@@ -33,6 +33,7 @@ const colorMap: Record<string, { bg: string; text: string; dot: string }> = {
 
   // Gray states
   stopped: { bg: 'bg-gray-500/10', text: 'text-gray-400', dot: 'bg-gray-400' },
+  standby: { bg: 'bg-gray-500/10', text: 'text-gray-400', dot: 'bg-gray-400' },
   terminated: { bg: 'bg-gray-500/10', text: 'text-gray-400', dot: 'bg-gray-400' },
   shutting_down: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', dot: 'bg-yellow-400' },
 
