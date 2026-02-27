@@ -150,7 +150,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
   const handleStart = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!secret) {
-      setActionError('Set deploy secret on Kamal page first');
+      setActionError('Authenticate first — click the lock icon in the header');
       return;
     }
     setActionLoading(true);
@@ -168,7 +168,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
   const handleStop = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!secret) {
-      setActionError('Set deploy secret on Kamal page first');
+      setActionError('Authenticate first — click the lock icon in the header');
       return;
     }
     setActionLoading(true);
@@ -199,7 +199,11 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
         </div>
         <div className="flex items-center gap-2">
           {isGh && ec2State && <StatusBadge status={ec2State} size="sm" />}
-          <span className="text-xs text-gray-500 bg-gray-800 px-2 py-0.5 rounded">{server.environment}</span>
+          <span className={`text-xs px-2 py-0.5 rounded ${
+            server.environment === 'production'
+              ? 'bg-red-900/40 text-red-400 border border-red-500/20'
+              : 'bg-blue-900/40 text-blue-400 border border-blue-500/20'
+          }`}>{server.environment}</span>
         </div>
       </div>
 
@@ -306,7 +310,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
             </button>
           )}
           {!secret && (isStopped || isRunning) && (
-            <span className="text-xs text-gray-600">Enter deploy secret on Kamal tab first</span>
+            <span className="text-xs text-gray-600">Click the lock icon in the header to authenticate</span>
           )}
           {actionError && <span className="text-xs text-red-400">{actionError}</span>}
         </div>

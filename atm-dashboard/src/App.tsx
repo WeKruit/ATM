@@ -54,6 +54,15 @@ function writeUrlState(tab: Tab, machineId: string | null): void {
 function AppContent() {
   const { servers, setActiveServer } = useFleet();
 
+  // Global deploy secret state
+  const [secret, setSecret] = useState(() => sessionStorage.getItem('atm-deploy-secret') || '');
+  const [showSecretInput, setShowSecretInput] = useState(false);
+
+  const handleSecretChange = (val: string) => {
+    setSecret(val);
+    sessionStorage.setItem('atm-deploy-secret', val);
+  };
+
   // Initialize state from URL params
   const initial = useMemo(() => readUrlState(), []);
   const [activeTab, setActiveTab] = useState<Tab>(initial.tab);
@@ -137,9 +146,47 @@ function AppContent() {
                 </button>
                 <span className="text-sm font-medium text-gray-300">{selectedMachine.name}</span>
                 <span className="text-xs font-mono text-gray-500">{selectedMachine.ip}</span>
-                <span className="text-xs text-gray-600 bg-gray-800 px-1.5 py-0.5 rounded">{selectedMachine.role}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${
+                  selectedMachine.environment === 'production'
+                    ? 'bg-red-900/40 text-red-400 border border-red-500/20'
+                    : 'bg-blue-900/40 text-blue-400 border border-blue-500/20'
+                }`}>{selectedMachine.environment}</span>
               </div>
             )}
+
+            {/* Auth controls */}
+            <div className="flex items-center gap-2">
+              {showSecretInput && (
+                <input
+                  type="password"
+                  value={secret}
+                  onChange={(e) => handleSecretChange(e.target.value)}
+                  placeholder="Deploy secret"
+                  className="w-48 bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-md px-2.5 py-1.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600"
+                  autoFocus
+                  onBlur={() => { if (!secret) setShowSecretInput(false); }}
+                  onKeyDown={(e) => { if (e.key === 'Escape') setShowSecretInput(false); }}
+                />
+              )}
+              <button
+                onClick={() => setShowSecretInput(!showSecretInput)}
+                className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  secret
+                    ? 'bg-green-900/30 text-green-400 border border-green-500/20 hover:bg-green-900/50'
+                    : 'bg-gray-800 text-gray-500 border border-gray-700 hover:bg-gray-700'
+                }`}
+                title={secret ? 'Authenticated — click to change secret' : 'Click to enter deploy secret'}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  {secret ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 119 0v3.75M3.75 21.75h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H3.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
+                  )}
+                </svg>
+                {secret ? 'Auth' : 'Lock'}
+              </button>
+            </div>
           </div>
         </div>
       </header>

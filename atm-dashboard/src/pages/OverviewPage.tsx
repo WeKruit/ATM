@@ -190,7 +190,7 @@ export default function OverviewPage() {
         onAction={async (action) => {
           const secret = sessionStorage.getItem('atm-deploy-secret') || '';
           if (!secret) {
-            setEc2ActionError('Set deploy secret on Kamal page first');
+            setEc2ActionError('Authenticate first — click the lock icon in the header');
             return;
           }
           setEc2ActionLoading(true);
@@ -468,7 +468,7 @@ function Ec2Panel({
             <span className="text-xs text-gray-500">Worker has active jobs -- drain before stopping</span>
           )}
           {!secret && (isStopped || isRunning) && (
-            <span className="text-xs text-gray-600">Enter deploy secret on Kamal tab to enable controls</span>
+            <span className="text-xs text-gray-600">Click the lock icon in the header to authenticate</span>
           )}
           {actionError && <span className="text-xs text-red-400">{actionError}</span>}
         </div>
