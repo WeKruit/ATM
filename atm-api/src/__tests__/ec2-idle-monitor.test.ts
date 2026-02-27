@@ -12,11 +12,13 @@ import {
   type WorkerIdleState,
 } from '../ec2-idle-monitor';
 import { setEc2SendImpl } from '../ec2-client';
+import { setAsgSendImpl } from '../asg-client';
 import { DescribeInstancesCommand, StopInstancesCommand } from '@aws-sdk/client-ec2';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 let ec2Calls: { commandType: string; input: any }[];
+let asgCalls: { commandType: string; input: any }[];
 let fetchCalls: string[];
 
 function mockWorkerHealth(responses: Record<string, { active_jobs: number } | null>) {
@@ -72,6 +74,43 @@ function mockEc2(opts?: { stopError?: boolean }) {
   });
 }
 
+function mockAsg(opts?: {
+  asgName?: string | null;
+  lifecycleState?: string;
+  enterStandbyError?: boolean;
+}) {
+  setAsgSendImpl((command: any) => {
+    const name = command.constructor?.name ?? 'Unknown';
+    asgCalls.push({ commandType: name, input: command.input });
+
+    if (name === 'DescribeAutoScalingInstancesCommand') {
+      if (opts?.asgName === null || opts?.asgName === undefined) {
+        return Promise.resolve({ AutoScalingInstances: [] });
+      }
+      return Promise.resolve({
+        AutoScalingInstances: [{
+          InstanceId: command.input.InstanceIds?.[0],
+          AutoScalingGroupName: opts.asgName ?? 'ghosthands-worker-asg',
+          LifecycleState: opts.lifecycleState ?? 'InService',
+        }],
+      });
+    }
+
+    if (name === 'EnterStandbyCommand') {
+      if (opts?.enterStandbyError) {
+        return Promise.reject(new Error('EnterStandby failed'));
+      }
+      return Promise.resolve({});
+    }
+
+    if (name === 'ExitStandbyCommand') {
+      return Promise.resolve({});
+    }
+
+    return Promise.resolve({});
+  });
+}
+
 /** Helper to set worker state directly for testing evaluateIdleWorkers */
 function initWorkerStates(entries: FleetEntry[], opts: Partial<WorkerIdleState>[] = []) {
   // Start with a very long timeout so it doesn't auto-stop during init
@@ -88,14 +127,17 @@ function initWorkerStates(entries: FleetEntry[], opts: Partial<WorkerIdleState>[
 
 beforeEach(() => {
   ec2Calls = [];
+  asgCalls = [];
   fetchCalls = [];
   mockEc2();
+  mockAsg({ asgName: null }); // Default: not ASG-managed
 });
 
 afterEach(() => {
   stop();
   setFetchImpl(null);
   setEc2SendImpl(null);
+  setAsgSendImpl(null);
 });
 
 // ── pollWorkerHealth ─────────────────────────────────────────────────
@@ -457,5 +499,140 @@ describe('stop', () => {
 
     // Calling stop again is a no-op
     stop();
+  });
+});
+
+// ── ASG standby integration ─────────────────────────────────────────
+
+describe('ASG standby', () => {
+  it('19: enters standby before stopping ASG-managed worker', async () => {
+    mockEc2();
+    mockAsg({ asgName: 'ghosthands-worker-asg' });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { idleTimeoutMs: 1000, minRunning: 0, pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].lastActiveAt = Date.now() - 5000;
+    states[0].ec2State = 'running';
+    states[0].activeJobs = 0;
+
+    ec2Calls = [];
+    asgCalls = [];
+    await evaluateIdleWorkers();
+
+    // enterStandby should be called before stopInstance
+    const enterCalls = asgCalls.filter(c => c.commandType === 'EnterStandbyCommand');
+    expect(enterCalls).toHaveLength(1);
+    expect(enterCalls[0].input.InstanceIds).toEqual(['i-1']);
+    expect(enterCalls[0].input.AutoScalingGroupName).toBe('ghosthands-worker-asg');
+    expect(enterCalls[0].input.ShouldDecrementDesiredCapacity).toBe(true);
+
+    // stopInstance should also be called
+    const stopCalls = ec2Calls.filter(c => c.commandType === 'StopInstancesCommand');
+    expect(stopCalls).toHaveLength(1);
+
+    // Worker should be marked as in standby
+    expect(states[0].inStandby).toBe(true);
+    expect(states[0].ec2State as string).toBe('stopping');
+  });
+
+  it('20: skips standby for non-ASG worker', async () => {
+    mockEc2();
+    mockAsg({ asgName: null }); // Not ASG-managed
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { idleTimeoutMs: 1000, minRunning: 0, pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].lastActiveAt = Date.now() - 5000;
+    states[0].ec2State = 'running';
+    states[0].activeJobs = 0;
+
+    ec2Calls = [];
+    asgCalls = [];
+    await evaluateIdleWorkers();
+
+    // No ASG calls should happen
+    const enterCalls = asgCalls.filter(c => c.commandType === 'EnterStandbyCommand');
+    expect(enterCalls).toHaveLength(0);
+
+    // stopInstance should still be called directly
+    const stopCalls = ec2Calls.filter(c => c.commandType === 'StopInstancesCommand');
+    expect(stopCalls).toHaveLength(1);
+    expect(states[0].inStandby).toBe(false);
+  });
+
+  it('21: skips stop if enterStandby fails (ASG would replace)', async () => {
+    mockEc2();
+    mockAsg({ asgName: 'ghosthands-worker-asg', enterStandbyError: true });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { idleTimeoutMs: 1000, minRunning: 0, pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].lastActiveAt = Date.now() - 5000;
+    states[0].ec2State = 'running';
+    states[0].activeJobs = 0;
+
+    ec2Calls = [];
+    asgCalls = [];
+    await evaluateIdleWorkers();
+
+    // enterStandby was attempted
+    const enterCalls = asgCalls.filter(c => c.commandType === 'EnterStandbyCommand');
+    expect(enterCalls).toHaveLength(1);
+
+    // stopInstance should NOT be called (enterStandby failed → skip to avoid ASG replacement)
+    const stopCalls = ec2Calls.filter(c => c.commandType === 'StopInstancesCommand');
+    expect(stopCalls).toHaveLength(0);
+
+    // Worker should not be transitioning
+    expect(states[0].transitioning).toBe(false);
+    expect(states[0].ec2State as string).toBe('running');
+  });
+
+  it('22: skips standby when already in standby (retries stop)', async () => {
+    mockEc2();
+    mockAsg({ asgName: 'ghosthands-worker-asg' });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { idleTimeoutMs: 1000, minRunning: 0, pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].lastActiveAt = Date.now() - 5000;
+    states[0].ec2State = 'running';
+    states[0].activeJobs = 0;
+    states[0].inStandby = true; // Already in standby from previous cycle
+
+    ec2Calls = [];
+    asgCalls = [];
+    await evaluateIdleWorkers();
+
+    // enterStandby should NOT be called again
+    const enterCalls = asgCalls.filter(c => c.commandType === 'EnterStandbyCommand');
+    expect(enterCalls).toHaveLength(0);
+
+    // stopInstance should be called directly
+    const stopCalls = ec2Calls.filter(c => c.commandType === 'StopInstancesCommand');
+    expect(stopCalls).toHaveLength(1);
+  });
+
+  it('23: start() discovers Standby lifecycle from ASG', async () => {
+    mockEc2();
+    mockAsg({ asgName: 'ghosthands-worker-asg', lifecycleState: 'Standby' });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    expect(states[0].asgName).toBe('ghosthands-worker-asg');
+    expect(states[0].inStandby).toBe(true);
+    expect(states[0].ec2State as string).toBe('standby');
   });
 });

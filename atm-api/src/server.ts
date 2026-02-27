@@ -81,6 +81,7 @@ import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
 import * as idleMonitor from './ec2-idle-monitor';
 import { startInstance, stopInstance, describeInstance } from './ec2-client';
+import { enterStandby, exitStandby } from './asg-client';
 import path from 'node:path';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
@@ -143,7 +144,7 @@ const currentEnvironment: 'staging' | 'production' =
 
 // ── EC2 Idle Monitor Config ──────────────────────────────────────────
 const EC2_IDLE_ENABLED = process.env.EC2_IDLE_ENABLED === 'true';
-const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '1800000', 10);
+const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '300000', 10);
 const EC2_MIN_RUNNING = parseInt(process.env.EC2_MIN_RUNNING || '0', 10);
 const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000', 10);
 
@@ -587,6 +588,7 @@ function parseKamalHosts(yamlContent: string): Record<string, string[]> {
 if (typeof Bun !== 'undefined') {
   Bun.serve({
     port: DEPLOY_PORT,
+    idleTimeout: 255, // seconds; wake endpoint polls health for up to 120s
     async fetch(req) {
       // CORS preflight
       if (req.method === 'OPTIONS') {
@@ -893,6 +895,15 @@ async function handleRequest(req: Request): Promise<Response> {
           idleMonitor.markTransitioning(worker.serverId, true);
           try {
             await startInstance(worker.instanceId!);
+            // Exit ASG standby if needed (non-fatal)
+            if (worker.inStandby && worker.asgName) {
+              try {
+                await exitStandby(worker.instanceId!, worker.asgName);
+                worker.inStandby = false;
+              } catch (err) {
+                console.warn(`[fleet/wake] exitStandby failed for ${worker.serverId} (non-fatal):`, err);
+              }
+            }
             idleMonitor.updateWorkerEc2(worker.serverId, 'pending');
             idleMonitor.markActive(worker.serverId);
             results.push({ serverId: worker.serverId, status: 'starting', instanceId: worker.instanceId! });
@@ -1007,13 +1018,25 @@ async function handleRequest(req: Request): Promise<Response> {
             }
           }
 
+          // Exit ASG standby if needed (non-fatal)
+          let exitedStandby = false;
+          if (workerState?.inStandby && workerState.asgName) {
+            try {
+              await exitStandby(instanceId, workerState.asgName);
+              workerState.inStandby = false;
+              exitedStandby = true;
+            } catch (err) {
+              console.warn(`[fleet/${serverId}/wake] exitStandby failed (non-fatal):`, err);
+            }
+          }
+
           if (workerState) idleMonitor.markTransitioning(serverId, false);
 
           if (healthy) {
             if (workerState) idleMonitor.updateWorkerEc2(serverId, 'running', newIp!);
-            return Response.json({ status: 'started', serverId, instanceId, ip: newIp });
+            return Response.json({ status: 'started', serverId, instanceId, ip: newIp, exitedStandby });
           } else {
-            return Response.json({ status: 'started_unhealthy', serverId, instanceId, ip: newIp });
+            return Response.json({ status: 'started_unhealthy', serverId, instanceId, ip: newIp, exitedStandby });
           }
         } catch (err) {
           if (workerState) idleMonitor.markTransitioning(serverId, false);
@@ -1093,13 +1116,29 @@ async function handleRequest(req: Request): Promise<Response> {
           }
 
           if (workerState) idleMonitor.markTransitioning(serverId, true);
+
+          // Enter ASG standby first if ASG-managed
+          let enteredStandby = false;
+          if (workerState?.asgName && !workerState.inStandby) {
+            try {
+              await enterStandby(instanceId, workerState.asgName);
+              workerState.inStandby = true;
+              enteredStandby = true;
+            } catch (err) {
+              if (workerState) idleMonitor.markTransitioning(serverId, false);
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(`[fleet/${serverId}/stop] enterStandby failed:`, msg);
+              return Response.json({ error: `enterStandby failed: ${msg}` }, { status: 500 });
+            }
+          }
+
           await stopInstance(instanceId);
           if (workerState) {
             idleMonitor.updateWorkerEc2(serverId, 'stopping');
             idleMonitor.markTransitioning(serverId, false);
           }
 
-          return Response.json({ status: 'stopping', serverId, instanceId });
+          return Response.json({ status: 'stopping', serverId, instanceId, enteredStandby });
         } catch (err) {
           if (workerState) idleMonitor.markTransitioning(serverId, false);
           const msg = err instanceof Error ? err.message : String(err);

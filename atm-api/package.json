@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@aws-sdk/client-auto-scaling": "^3.500.0",
     "@aws-sdk/client-ec2": "^3.500.0",
     "@aws-sdk/client-secrets-manager": "^3.500.0",
     "@infisical/sdk": "^2.3.5"

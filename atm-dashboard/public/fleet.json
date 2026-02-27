@@ -1,6 +1,6 @@
 {
   "_note": "Fleet configuration for ATM. Adding a server here auto-registers it in the dashboard and fleet proxy. Reload with POST /fleet/reload.",
-  "_format": "Each server needs: id (unique slug), name (display), host (proxy prefix, empty for same-origin), ip (actual IP), role (atm|ghosthands), environment, region, type",
+  "_format": "Each server needs: id (unique slug), name (display), host (proxy prefix, empty for same-origin), ip (actual IP), role (atm|ghosthands), environment, region, type. ec2InstanceId enables direct EC2 API calls (avoids IP-based resolution which breaks on stop/start).",
   "servers": [
     {
       "id": "atm-gw1",
@@ -10,7 +10,8 @@
       "region": "us-east-1",
       "ip": "34.195.147.149",
       "type": "t3.large",
-      "role": "atm"
+      "role": "atm",
+      "ec2InstanceId": "i-0b369c07ccf903b92"
     },
     {
       "id": "gh-worker-1",
@@ -18,9 +19,21 @@
       "host": "/fleet/gh-worker-1",
       "environment": "staging",
       "region": "us-east-1",
-      "ip": "44.223.180.11",
+      "ip": "44.202.208.128",
       "type": "t3.large",
-      "role": "ghosthands"
+      "role": "ghosthands",
+      "ec2InstanceId": "i-055ee8761f84cec1b"
+    },
+    {
+      "id": "gh-worker-2",
+      "name": "GH Worker 2",
+      "host": "/fleet/gh-worker-2",
+      "environment": "staging",
+      "region": "us-east-1",
+      "ip": "35.170.51.196",
+      "type": "t3.large",
+      "role": "ghosthands",
+      "ec2InstanceId": "i-01a6dc03d22ceb6b0"
     }
   ]
 }

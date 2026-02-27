@@ -7,7 +7,8 @@
  * @module atm-api/src/ec2-idle-monitor
  */
 
-import { stopInstance, describeInstancesByIps, type Ec2InstanceInfo } from './ec2-client';
+import { stopInstance, describeInstance, describeInstancesByIps, type Ec2InstanceInfo } from './ec2-client';
+import { describeAsgInstance, enterStandby, exitStandby } from './asg-client';
 
 // ── Dependency injection for fetch (testing) ─────────────────────────
 
@@ -32,8 +33,10 @@ export interface WorkerIdleState {
   instanceId: string | null;
   lastActiveAt: number;
   activeJobs: number;
-  ec2State: 'running' | 'stopped' | 'stopping' | 'pending' | 'shutting-down' | 'terminated' | 'unknown';
+  ec2State: 'running' | 'stopped' | 'stopping' | 'pending' | 'standby' | 'shutting-down' | 'terminated' | 'unknown';
   transitioning: boolean;
+  asgName: string | null;
+  inStandby: boolean;
 }
 
 export interface FleetEntry {
@@ -55,7 +58,7 @@ export interface IdleMonitorConfig {
 let workerStates: Map<string, WorkerIdleState> = new Map();
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 let config: IdleMonitorConfig = {
-  idleTimeoutMs: 1_800_000,
+  idleTimeoutMs: 300_000,
   minRunning: 0,
   pollIntervalMs: 60_000,
   workerPort: 3101,
@@ -91,6 +94,8 @@ export async function start(
       activeJobs: 0,
       ec2State: 'running',
       transitioning: false,
+      asgName: null,
+      inStandby: false,
     });
   }
 
@@ -111,6 +116,8 @@ export async function start(
           activeJobs: 0,
           ec2State: info?.state === 'running' ? 'running' : (info?.state ?? 'unknown'),
           transitioning: false,
+          asgName: null,
+          inStandby: false,
         });
       }
     } catch (err) {
@@ -124,8 +131,30 @@ export async function start(
           activeJobs: 0,
           ec2State: 'unknown',
           transitioning: false,
+          asgName: null,
+          inStandby: false,
         });
       }
+    }
+  }
+
+  // Discover ASG membership for all workers with instance IDs
+  for (const state of workerStates.values()) {
+    if (!state.instanceId) continue;
+    try {
+      const asgInfo = await describeAsgInstance(state.instanceId);
+      state.asgName = asgInfo.autoScalingGroupName;
+      if (asgInfo.lifecycleState === 'Standby') {
+        state.inStandby = true;
+        state.ec2State = 'standby';
+      }
+      if (state.asgName) {
+        console.log(
+          `[idle-monitor] ${state.serverId} (${state.instanceId}) is ASG-managed: ${state.asgName}, lifecycle=${asgInfo.lifecycleState}`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[idle-monitor] Failed to check ASG for ${state.serverId}:`, err);
     }
   }
 
@@ -185,8 +214,8 @@ export async function pollWorkerHealth(): Promise<void> {
   const f = getFetch();
 
   for (const state of workerStates.values()) {
-    // Skip workers we know are stopped
-    if (state.ec2State === 'stopped' || state.ec2State === 'stopping') continue;
+    // Skip workers we know are stopped or in standby
+    if (state.ec2State === 'stopped' || state.ec2State === 'stopping' || state.ec2State === 'standby') continue;
 
     try {
       const resp = await f(`http://${state.ip}:${config.workerPort}/worker/health`, {
@@ -206,7 +235,21 @@ export async function pollWorkerHealth(): Promise<void> {
         state.lastActiveAt = Date.now();
       }
     } catch {
-      state.ec2State = 'unknown';
+      // Health check failed — if we have an instance ID, refresh state + IP from EC2
+      if (state.instanceId) {
+        try {
+          const info = await describeInstance(state.instanceId);
+          state.ec2State = info.state === 'running' ? 'running' : info.state;
+          if (info.publicIp && info.publicIp !== state.ip) {
+            console.log(`[idle-monitor] IP changed for ${state.serverId}: ${state.ip} → ${info.publicIp}`);
+            state.ip = info.publicIp;
+          }
+        } catch {
+          state.ec2State = 'unknown';
+        }
+      } else {
+        state.ec2State = 'unknown';
+      }
     }
   }
 }
@@ -245,6 +288,18 @@ export async function evaluateIdleWorkers(): Promise<void> {
     );
     worker.transitioning = true;
     try {
+      // Enter ASG standby first (if ASG-managed and not already in standby)
+      if (worker.asgName && !worker.inStandby) {
+        try {
+          console.log(`[idle-monitor] Entering standby for ASG-managed ${worker.serverId} in ${worker.asgName}`);
+          await enterStandby(worker.instanceId!, worker.asgName);
+          worker.inStandby = true;
+        } catch (err) {
+          console.error(`[idle-monitor] enterStandby failed for ${worker.serverId}, skipping stop:`, err);
+          worker.transitioning = false;
+          continue; // Don't stop — ASG would replace it
+        }
+      }
       await stopInstance(worker.instanceId!);
       worker.ec2State = 'stopping';
     } catch (err) {

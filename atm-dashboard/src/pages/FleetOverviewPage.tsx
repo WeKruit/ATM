@@ -123,17 +123,21 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
 
   const isGh = server.role === 'ghosthands';
   const ec2State = idleWorker?.ec2State ?? null;
-  const isStopped = ec2State === 'stopped';
+  const isStopped = ec2State === 'stopped' || ec2State === 'terminated';
   const isRunning = ec2State === 'running';
-  const isStopping = ec2State === 'stopping';
+  const isStopping = ec2State === 'stopping' || ec2State === 'shutting-down';
   const isPending = ec2State === 'pending';
   const isTransitioning = idleWorker?.transitioning || isStopping || isPending;
 
+  // Non-GH servers (ATM) use reachable alone — they have no idle-monitor entry
+  const effectivelyStopped = isGh ? isStopped : false;
+  const effectivelyTransitioning = isGh ? isTransitioning : false;
+
   // Determine border color: stopped = gray, running+reachable = green, transitioning = yellow, else red
   let borderColor: string;
-  if (isStopped) {
+  if (effectivelyStopped) {
     borderColor = 'border-gray-600/30 hover:border-gray-600/50';
-  } else if (isTransitioning) {
+  } else if (effectivelyTransitioning) {
     borderColor = 'border-yellow-500/30 hover:border-yellow-500/50';
   } else if (reachable) {
     borderColor = 'border-green-500/30 hover:border-green-500/50';
@@ -188,7 +192,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
         <div className="flex items-center gap-2">
           <span
             className={`h-2.5 w-2.5 rounded-full ${
-              isStopped ? 'bg-gray-500' : isTransitioning ? 'bg-yellow-400 animate-pulse' : reachable ? 'bg-green-400' : 'bg-red-400'
+              effectivelyStopped ? 'bg-gray-500' : effectivelyTransitioning ? 'bg-yellow-400 animate-pulse' : reachable ? 'bg-green-400' : 'bg-red-400'
             }`}
           />
           <span className="text-sm font-semibold text-gray-200">{server.name}</span>
@@ -225,7 +229,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
           </svg>
-          EC2 instance stopped
+          EC2 instance {ec2State === 'terminated' ? 'terminated' : 'stopped'}
         </div>
       )}
 
@@ -264,7 +268,7 @@ function ServerCard({ server, status, idleWorker, idleConfig, onClick, onRefresh
         </div>
       )}
 
-      {!reachable && !isStopped && !isTransitioning && ec2State !== 'stopping' && ec2State !== 'pending' && (
+      {!reachable && !effectivelyStopped && !effectivelyTransitioning && (
         <div className="text-xs text-red-400/80 mt-2">Server unreachable</div>
       )}
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import * as idleMonitor from '../ec2-idle-monitor';
 import { setEc2SendImpl } from '../ec2-client';
+import { setAsgSendImpl } from '../asg-client';
 import {
   DescribeInstancesCommand,
   StartInstancesCommand,
@@ -16,6 +17,7 @@ import {
  */
 
 let ec2Calls: { commandType: string; input: any }[];
+let asgCalls: { commandType: string; input: any }[];
 
 function makeEc2Mock(opts?: {
   describeState?: string;
@@ -80,14 +82,36 @@ function makeEc2Mock(opts?: {
   };
 }
 
+function mockAsg(opts?: { exitStandbyError?: boolean }) {
+  setAsgSendImpl((command: any) => {
+    const name = command.constructor?.name ?? 'Unknown';
+    asgCalls.push({ commandType: name, input: command.input });
+
+    if (name === 'DescribeAutoScalingInstancesCommand') {
+      return Promise.resolve({ AutoScalingInstances: [] }); // Not ASG-managed by default
+    }
+
+    if (name === 'ExitStandbyCommand') {
+      if (opts?.exitStandbyError) {
+        return Promise.reject(new Error('ExitStandby failed'));
+      }
+      return Promise.resolve({});
+    }
+
+    return Promise.resolve({});
+  });
+}
+
 beforeEach(() => {
   ec2Calls = [];
+  asgCalls = [];
 });
 
 afterEach(() => {
   idleMonitor.stop();
   idleMonitor.setFetchImpl(null);
   setEc2SendImpl(null);
+  setAsgSendImpl(null);
 });
 
 describe('wake logic', () => {
@@ -307,5 +331,93 @@ describe('stop logic', () => {
 
     expect(worker.ec2State as string).toBe('stopping');
     expect(worker.transitioning).toBe(false);
+  });
+});
+
+// ── ASG standby + wake/stop ─────────────────────────────────────────
+
+describe('ASG standby wake', () => {
+  it('15: exitStandby called on wake when inStandby', async () => {
+    setEc2SendImpl(makeEc2Mock({ describeState: 'stopped' }));
+    mockAsg();
+    await idleMonitor.start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const worker = idleMonitor.getWorkerStates()[0];
+    worker.ec2State = 'stopped';
+    worker.asgName = 'ghosthands-worker-asg';
+    worker.inStandby = true;
+
+    // Simulate server wake flow: start instance
+    ec2Calls = [];
+    asgCalls = [];
+    const { startInstance: startInst } = await import('../ec2-client');
+    await startInst('i-1');
+
+    // Then exitStandby
+    const { exitStandby: exitSb } = await import('../asg-client');
+    await exitSb('i-1', worker.asgName!);
+    worker.inStandby = false;
+
+    expect(asgCalls.some(c => c.commandType === 'ExitStandbyCommand')).toBe(true);
+    expect(worker.inStandby).toBe(false);
+  });
+
+  it('16: wake skips exitStandby for non-ASG worker', async () => {
+    setEc2SendImpl(makeEc2Mock({ describeState: 'stopped' }));
+    mockAsg();
+    await idleMonitor.start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const worker = idleMonitor.getWorkerStates()[0];
+    worker.ec2State = 'stopped';
+    worker.asgName = null; // Not ASG-managed
+    worker.inStandby = false;
+
+    ec2Calls = [];
+    asgCalls = [];
+    const { startInstance: startInst } = await import('../ec2-client');
+    await startInst('i-1');
+
+    // No ASG calls should happen
+    expect(asgCalls.filter(c => c.commandType === 'ExitStandbyCommand')).toHaveLength(0);
+  });
+
+  it('17: exitStandby failure is non-fatal', async () => {
+    setEc2SendImpl(makeEc2Mock({ describeState: 'stopped' }));
+    mockAsg({ exitStandbyError: true });
+    await idleMonitor.start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const worker = idleMonitor.getWorkerStates()[0];
+    worker.ec2State = 'stopped';
+    worker.asgName = 'ghosthands-worker-asg';
+    worker.inStandby = true;
+
+    // Start works fine
+    const { startInstance: startInst } = await import('../ec2-client');
+    await startInst('i-1');
+
+    // exitStandby fails but should not throw
+    const { exitStandby: exitSb } = await import('../asg-client');
+    let exitError: Error | null = null;
+    try {
+      await exitSb('i-1', worker.asgName!);
+    } catch (e) {
+      exitError = e as Error;
+    }
+
+    // The error happens but server catches it as non-fatal
+    expect(exitError).not.toBeNull();
+    expect(exitError!.message).toBe('ExitStandby failed');
+
+    // Worker is still running — inStandby stays true (server would log warning)
+    expect(worker.inStandby).toBe(true);
   });
 });
