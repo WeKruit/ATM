@@ -219,6 +219,64 @@ export async function getSecretValue(
   return { key, value };
 }
 
+/**
+ * Fetches all secrets from a given Infisical path via REST API.
+ * Uses Universal Auth (client ID + secret) for Machine Identity authentication.
+ *
+ * @param secretPath - Folder path (e.g., '/ghosthands')
+ * @param environment - Infisical environment override (default: INFISICAL_ENVIRONMENT)
+ * @returns Record<string, string> mapping secret keys to values
+ */
+export async function fetchSecretsForPath(
+  secretPath: string,
+  environment?: string,
+): Promise<Record<string, string>> {
+  const config = getInfisicalConfig();
+  if (!config) {
+    throw new Error('Infisical not configured — cannot fetch secrets');
+  }
+
+  const env = environment || config.environment;
+
+  // Authenticate with Universal Auth
+  const authRes = await fetch(`${config.siteUrl}/api/v1/auth/universal-auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+    }),
+  });
+  if (!authRes.ok) {
+    throw new Error(`Infisical auth failed: ${authRes.status} ${await authRes.text()}`);
+  }
+  const authData = (await authRes.json()) as { accessToken: string };
+
+  // Fetch all secrets from the given path
+  const secretsUrl = new URL(`${config.siteUrl}/api/v3/secrets/raw`);
+  secretsUrl.searchParams.set('workspaceId', config.projectId);
+  secretsUrl.searchParams.set('environment', env);
+  secretsUrl.searchParams.set('secretPath', secretPath);
+
+  const secretsRes = await fetch(secretsUrl.toString(), {
+    headers: { Authorization: `Bearer ${authData.accessToken}` },
+  });
+  if (!secretsRes.ok) {
+    throw new Error(`Infisical secrets fetch failed: ${secretsRes.status} ${await secretsRes.text()}`);
+  }
+
+  const secretsData = (await secretsRes.json()) as {
+    secrets: Array<{ secretKey: string; secretValue: string }>;
+  };
+
+  const result: Record<string, string> = {};
+  for (const s of secretsData.secrets || []) {
+    result[s.secretKey] = s.secretValue;
+  }
+
+  return result;
+}
+
 /** Service paths organized in Infisical */
 export const SECRET_PATHS = ['/valet', '/ghosthands', '/atm'] as const;
 

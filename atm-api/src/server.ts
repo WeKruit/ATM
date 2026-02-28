@@ -17,6 +17,7 @@
  *   POST /admin/refresh-secrets — Re-fetch secrets from Infisical/AWS SM (requires X-Deploy-Secret)
  *   GET  /deploys              — List deploy history records (no auth)
  *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
+ *   GET  /secrets/ghosthands   — Fetch all GH secrets for Mac deploy (requires X-Deploy-Secret)
  *   GET  /secrets/status       — Infisical connection status (no auth)
  *   GET  /deploy/stream        — SSE stream for real-time deploy logs (no auth)
  *   GET  /kamal/validate       — Pre-deploy validation checks (no auth)
@@ -75,7 +76,7 @@ import { getEcrAuth, getEcrImageRef } from './ecr-auth';
 import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
-import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue } from './infisical-client';
+import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue, fetchSecretsForPath } from './infisical-client';
 import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal } from './kamal-runner';
 import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
@@ -1390,9 +1391,43 @@ async function handleRequest(req: Request): Promise<Response> {
         return Response.json(keys);
       }
 
+      // ── GET /secrets/ghosthands — Fetch all GH secrets for Mac deploy ──
+      // Optional query param: ?environment=staging (default: INFISICAL_ENVIRONMENT)
+      // Filters out EC2-specific keys not needed on Mac
+      if (url.pathname === '/secrets/ghosthands' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const environment = url.searchParams.get('environment') || undefined;
+        try {
+          const allSecrets = await fetchSecretsForPath('/ghosthands', environment);
+
+          // Filter out EC2-specific keys not needed on Mac
+          const EC2_ONLY_KEYS = ['AWS_ASG_NAME', 'AWS_LIFECYCLE_HOOK_NAME', 'ECR_REGISTRY', 'ECR_REPOSITORY', 'VNC_PW'];
+          const secrets: Record<string, string> = {};
+          for (const [key, value] of Object.entries(allSecrets)) {
+            if (!EC2_ONLY_KEYS.includes(key)) {
+              secrets[key] = value;
+            }
+          }
+
+          return Response.json({
+            secrets,
+            count: Object.keys(secrets).length,
+            environment: environment || process.env.INFISICAL_ENVIRONMENT || 'staging',
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 500 });
+        }
+      }
+
       // ── GET /secrets/:key — Get a single secret value (authenticated) ──
       // Optional query param: ?path=/valet (default: /)
-      if (url.pathname.startsWith('/secrets/') && url.pathname !== '/secrets/status' && url.pathname !== '/secrets/list' && req.method === 'GET') {
+      if (url.pathname.startsWith('/secrets/') && url.pathname !== '/secrets/status' && url.pathname !== '/secrets/list' && url.pathname !== '/secrets/ghosthands' && req.method === 'GET') {
         if (!verifySecret(req)) {
           return Response.json(
             { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },

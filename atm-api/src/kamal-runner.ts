@@ -10,7 +10,7 @@
  * @module atm-api/src/kamal-runner
  */
 
-import { getInfisicalConfig } from './infisical-client';
+import { getInfisicalConfig, fetchSecretsForPath } from './infisical-client';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -255,57 +255,16 @@ export async function fetchSecretsForKamalDeploy(
   }
 
   // 2. Fetch GH secrets from Infisical REST API
-  const infisicalConfig = getInfisicalConfig();
-  if (!infisicalConfig) {
-    throw new Error('Infisical not configured — cannot fetch secrets for Kamal deploy');
-  }
-
   const infisicalEnv = destination === 'production' ? 'prod' : 'staging';
   console.log(`[kamal-runner] Fetching secrets from Infisical (env=${infisicalEnv}, path=/ghosthands)...`);
 
   try {
-    // Authenticate with Universal Auth
-    const authRes = await fetch(`${infisicalConfig.siteUrl}/api/v1/auth/universal-auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId: infisicalConfig.clientId,
-        clientSecret: infisicalConfig.clientSecret,
-      }),
-    });
-    if (!authRes.ok) {
-      throw new Error(`Auth failed: ${authRes.status} ${await authRes.text()}`);
-    }
-    const authData = (await authRes.json()) as { accessToken: string };
-    const token = authData.accessToken;
-
-    // Fetch all secrets from /ghosthands path in batch
-    const secretsUrl = new URL(`${infisicalConfig.siteUrl}/api/v3/secrets/raw`);
-    secretsUrl.searchParams.set('workspaceId', infisicalConfig.projectId);
-    secretsUrl.searchParams.set('environment', infisicalEnv);
-    secretsUrl.searchParams.set('secretPath', '/ghosthands');
-
-    const secretsRes = await fetch(secretsUrl.toString(), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!secretsRes.ok) {
-      throw new Error(`Secrets fetch failed: ${secretsRes.status} ${await secretsRes.text()}`);
-    }
-
-    const secretsData = (await secretsRes.json()) as {
-      secrets: Array<{ secretKey: string; secretValue: string }>;
-    };
-
-    // Build env map from fetched secrets
-    const secretMap = new Map<string, string>();
-    for (const s of secretsData.secrets || []) {
-      secretMap.set(s.secretKey, s.secretValue);
-    }
+    const allSecrets = await fetchSecretsForPath('/ghosthands', infisicalEnv);
 
     // Map required keys
     let found = 0;
     for (const key of KAMAL_SECRET_KEYS) {
-      const val = secretMap.get(key);
+      const val = allSecrets[key];
       if (val !== undefined) {
         env[key] = val;
         found++;
