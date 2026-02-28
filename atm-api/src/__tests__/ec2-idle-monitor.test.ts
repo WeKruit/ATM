@@ -636,3 +636,129 @@ describe('ASG standby', () => {
     expect(states[0].ec2State as string).toBe('standby');
   });
 });
+
+// ── State transition polling ────────────────────────────────────────
+
+describe('state transition polling', () => {
+  /** Enhanced mock that handles both InstanceIds and Filters-based DescribeInstances */
+  function mockEc2WithStates(instanceStates: Record<string, { state: string; publicIp?: string }>) {
+    setEc2SendImpl((command: any) => {
+      const name = command.constructor?.name ?? 'Unknown';
+      ec2Calls.push({ commandType: name, input: command.input });
+
+      if (name === 'DescribeInstancesCommand') {
+        // Handle InstanceIds-based lookup
+        const instanceIds: string[] = command.input.InstanceIds ?? [];
+        if (instanceIds.length > 0) {
+          const id = instanceIds[0];
+          const info = instanceStates[id];
+          if (!info) {
+            return Promise.resolve({ Reservations: [] });
+          }
+          return Promise.resolve({
+            Reservations: [{
+              Instances: [{
+                InstanceId: id,
+                State: { Name: info.state },
+                PublicIpAddress: info.publicIp ?? null,
+              }],
+            }],
+          });
+        }
+        // Handle Filters-based lookup (for IP resolution)
+        const ips: string[] = command.input.Filters?.[0]?.Values ?? [];
+        return Promise.resolve({
+          Reservations: ips.map((ip: string, i: number) => ({
+            Instances: [{
+              InstanceId: `i-resolved-${i}`,
+              State: { Name: 'running' },
+              PublicIpAddress: ip,
+            }],
+          })),
+        });
+      }
+
+      if (name === 'StopInstancesCommand') {
+        return Promise.resolve({
+          StoppingInstances: [{ CurrentState: { Name: 'stopping' } }],
+        });
+      }
+
+      return Promise.resolve({});
+    });
+  }
+
+  it('24: stopping transitions to stopped on next poll', async () => {
+    mockEc2WithStates({ 'i-1': { state: 'running', publicIp: '10.0.0.1' } });
+    mockAsg({ asgName: null });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].ec2State = 'stopping'; // Simulate post-stop state
+
+    // Now EC2 says it's stopped
+    mockEc2WithStates({ 'i-1': { state: 'stopped' } });
+    await pollWorkerHealth();
+
+    expect(states[0].ec2State as string).toBe('stopped');
+  });
+
+  it('25: pending transitions to running on next poll', async () => {
+    mockEc2WithStates({ 'i-1': { state: 'running', publicIp: '10.0.0.1' } });
+    mockAsg({ asgName: null });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].ec2State = 'pending'; // Simulate post-wake state
+
+    // EC2 says running, health check succeeds
+    mockEc2WithStates({ 'i-1': { state: 'running', publicIp: '10.0.0.1' } });
+    mockWorkerHealth({ '10.0.0.1': { active_jobs: 0 } });
+    await pollWorkerHealth();
+
+    expect(states[0].ec2State as string).toBe('running');
+  });
+
+  it('26: standby with stopped EC2 reports stopped on startup', async () => {
+    // EC2 describes instance as stopped
+    mockEc2WithStates({ 'i-1': { state: 'stopped' } });
+    // ASG says Standby
+    mockAsg({ asgName: 'ghosthands-worker-asg', lifecycleState: 'Standby' });
+
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    expect(states[0].inStandby).toBe(true);
+    // Should report 'stopped', not 'standby', since EC2 is actually stopped
+    expect(states[0].ec2State as string).toBe('stopped');
+  });
+
+  it('27: IP update during state transition', async () => {
+    mockEc2WithStates({ 'i-1': { state: 'running', publicIp: '10.0.0.1' } });
+    mockAsg({ asgName: null });
+    await start(
+      [{ id: 'w1', ip: '10.0.0.1', role: 'ghosthands', ec2InstanceId: 'i-1' }],
+      { pollIntervalMs: 999_999_999 },
+    );
+
+    const states = getWorkerStates();
+    states[0].ec2State = 'pending'; // Simulate post-wake
+
+    // EC2 now running with new IP
+    mockEc2WithStates({ 'i-1': { state: 'running', publicIp: '10.0.0.99' } });
+    mockWorkerHealth({ '10.0.0.99': { active_jobs: 0 } });
+    await pollWorkerHealth();
+
+    expect(states[0].ec2State as string).toBe('running');
+    expect(states[0].ip).toBe('10.0.0.99');
+  });
+});

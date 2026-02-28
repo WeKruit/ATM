@@ -890,7 +890,7 @@ async function handleRequest(req: Request): Promise<Response> {
 
         const states = idleMonitor.getWorkerStates();
         const stopped = states.filter(
-          s => (s.ec2State === 'stopped') && !s.transitioning && s.instanceId,
+          s => (s.ec2State === 'stopped' || s.ec2State === 'standby') && !s.transitioning && s.instanceId,
         );
 
         if (stopped.length === 0) {
@@ -920,6 +920,7 @@ async function handleRequest(req: Request): Promise<Response> {
             }
             idleMonitor.updateWorkerEc2(worker.serverId, 'pending');
             idleMonitor.markActive(worker.serverId);
+            idleMonitor.markTransitioning(worker.serverId, false);
             results.push({ serverId: worker.serverId, status: 'starting', instanceId: worker.instanceId! });
           } catch (err) {
             idleMonitor.markTransitioning(worker.serverId, false);
