@@ -4,16 +4,7 @@ import { get } from '../api';
 import type { HealthResponse, MetricsResponse, VersionResponse, GhVersionInfo } from '../api';
 import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
-
-function formatUptime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${minutes}m`;
-}
+import { formatUptime } from '../utils/format';
 
 function MetricBar({ label, value, total, unit, percent }: { label: string; value: number; total: number; unit: string; percent: number }) {
   const color = percent >= 80 ? 'bg-red-500' : percent >= 60 ? 'bg-yellow-500' : 'bg-green-500';
@@ -164,7 +155,7 @@ export default function OverviewPage() {
           label="Uptime"
           value={
             <span className="text-2xl font-bold tabular-nums text-gray-100">
-              {health ? formatUptime(health.uptimeMs) : '-'}
+              {health ? formatUptime(Math.floor(health.uptimeMs / 1000)) : '-'}
             </span>
           }
         />
@@ -188,11 +179,17 @@ export default function OverviewPage() {
       {metrics && (
         <div>
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">System Resources</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <MetricBar label="CPU" value={metrics.cpu.usagePercent} total={100} unit={`% (${metrics.cpu.cores} cores)`} percent={metrics.cpu.usagePercent} />
-            <MetricBar label="Memory" value={metrics.memory.usedMb} total={metrics.memory.totalMb} unit="MB" percent={metrics.memory.usagePercent} />
-            <MetricBar label="Disk" value={metrics.disk.usedGb} total={metrics.disk.totalGb} unit="GB" percent={metrics.disk.usagePercent} />
-          </div>
+          {metrics.available ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <MetricBar label="CPU" value={metrics.cpu.usagePercent} total={100} unit={`% (${metrics.cpu.cores} cores)`} percent={metrics.cpu.usagePercent} />
+              <MetricBar label="Memory" value={metrics.memory.usedMb} total={metrics.memory.totalMb} unit="MB" percent={metrics.memory.usagePercent} />
+              <MetricBar label="Disk" value={metrics.disk.usedGb} total={metrics.disk.totalGb} unit="GB" percent={metrics.disk.usagePercent} />
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-6 text-center text-gray-500 text-sm">
+              Metrics unavailable — worker health endpoint unreachable
+            </div>
+          )}
         </div>
       )}
 
@@ -220,31 +217,40 @@ export default function OverviewPage() {
               </div>
               <div>
                 <span className="text-gray-500 text-xs uppercase tracking-wider">Server Uptime</span>
-                <p className="font-mono text-gray-200 mt-1">{formatUptime(version.uptimeMs)}</p>
+                <p className="font-mono text-gray-200 mt-1">{formatUptime(Math.floor(version.uptimeMs / 1000))}</p>
               </div>
             </div>
-            {version.ghosthands && typeof version.ghosthands === 'object' && 'commit_sha' in version.ghosthands && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mt-4 pt-4 border-t border-gray-800">
-                <div>
-                  <span className="text-gray-500 text-xs uppercase tracking-wider">Commit SHA</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs">{(version.ghosthands as GhVersionInfo).commit_sha.slice(0, 12)}</p>
+            {version.ghosthands && typeof version.ghosthands === 'object' && 'commit_sha' in version.ghosthands && (() => {
+              const gh = version.ghosthands as GhVersionInfo;
+              return (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mt-4 pt-4 border-t border-gray-800">
+                  <div>
+                    <span className="text-gray-500 text-xs uppercase tracking-wider">Commit SHA</span>
+                    <p className="font-mono text-gray-200 mt-1 text-xs">
+                      {gh.commit_sha === 'unknown' ? <span className="text-gray-500">Not available</span> : gh.commit_sha.slice(0, 12)}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 text-xs uppercase tracking-wider">Image Tag</span>
+                    <p className="font-mono text-gray-200 mt-1 text-xs truncate" title={gh.image_tag}>
+                      {gh.image_tag === 'unknown' ? <span className="text-gray-500">Not available</span> : gh.image_tag.slice(0, 20)}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 text-xs uppercase tracking-wider">Build Time</span>
+                    <p className="font-mono text-gray-200 mt-1 text-xs">
+                      {!gh.build_time || gh.build_time === 'unknown'
+                        ? <span className="text-gray-500">Not available</span>
+                        : new Date(gh.build_time).toLocaleString()}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 text-xs uppercase tracking-wider">GH Uptime</span>
+                    <p className="font-mono text-gray-200 mt-1 text-xs">{formatUptime(Math.floor(gh.uptime_ms / 1000))}</p>
+                  </div>
                 </div>
-                <div>
-                  <span className="text-gray-500 text-xs uppercase tracking-wider">Image Tag</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs truncate" title={(version.ghosthands as GhVersionInfo).image_tag}>
-                    {(version.ghosthands as GhVersionInfo).image_tag.slice(0, 20)}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-gray-500 text-xs uppercase tracking-wider">Build Time</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs">{new Date((version.ghosthands as GhVersionInfo).build_time).toLocaleString()}</p>
-                </div>
-                <div>
-                  <span className="text-gray-500 text-xs uppercase tracking-wider">GH Uptime</span>
-                  <p className="font-mono text-gray-200 mt-1 text-xs">{formatUptime((version.ghosthands as GhVersionInfo).uptime_ms)}</p>
-                </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}

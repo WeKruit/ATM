@@ -1404,7 +1404,7 @@ async function handleRequest(req: Request): Promise<Response> {
             status: workerHealth?.status ?? (workerStatus?.is_draining ? 'draining' : workerStatus?.is_running ? 'idle' : 'offline'),
             activeJobs: workerStatus?.active_jobs ?? workerHealth?.active_jobs ?? 0,
             statusPort: WORKER_PORT,
-            uptime: String(workerStatus?.uptime_ms ?? 0),
+            uptime: String(Math.floor((workerStatus?.uptime_ms ?? 0) / 1000)),
             image: process.env.ECR_IMAGE || 'unknown',
           };
 
@@ -1419,14 +1419,11 @@ async function handleRequest(req: Request): Promise<Response> {
             disk: { usedGb: number; totalGb: number; usagePercent: number };
           }>(`${ghApiBase}/health/system`);
 
-          if (sysMetrics) {
-            return Response.json(sysMetrics);
-          }
-
           return Response.json({
-            cpu: { usagePercent: 0, cores: 0 },
-            memory: { usedMb: 0, totalMb: 0, usagePercent: 0 },
-            disk: { usedGb: 0, totalGb: 0, usagePercent: 0 },
+            available: sysMetrics !== null,
+            cpu: sysMetrics?.cpu ?? { usagePercent: 0, cores: 0 },
+            memory: sysMetrics?.memory ?? { usedMb: 0, totalMb: 0, usagePercent: 0 },
+            disk: sysMetrics?.disk ?? { usedGb: 0, totalGb: 0, usagePercent: 0 },
           });
         }
 
