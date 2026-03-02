@@ -42,7 +42,8 @@
  *
  * Auth:
  *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
- *   GET endpoints are unauthenticated except /containers and /workers (which require X-Deploy-Secret).
+ *   GET endpoints are unauthenticated except /containers, /workers, /fleet/idle-status,
+ *   /fleet/:id/workers, and /fleet/:id/* fallback (all require X-Deploy-Secret).
  *
  * Secrets:
  *   On startup, tries Infisical first (self-hosted), falls back to AWS Secrets Manager
@@ -197,7 +198,7 @@ function discoverFleetFromKamal(): FleetServer[] {
   if (!configDir) return [];
 
   const discovered: FleetServer[] = [];
-  const seenIps = new Set<string>();
+  const seenTargets = new Set<string>();
   let workerIndex = 1;
 
   for (const dest of ['staging', 'production']) {
@@ -208,8 +209,9 @@ function discoverFleetFromKamal(): FleetServer[] {
       // Collect all unique IPs from web + workers roles
       for (const role of Object.values(hosts)) {
         for (const ip of role) {
-          if (seenIps.has(ip)) continue;
-          seenIps.add(ip);
+          const dedupeKey = `${dest}:${ip}`;
+          if (seenTargets.has(dedupeKey)) continue;
+          seenTargets.add(dedupeKey);
           discovered.push({
             id: `gh-worker-${workerIndex}`,
             name: `GH Worker ${workerIndex}`,
@@ -838,12 +840,46 @@ async function handleRequest(req: Request): Promise<Response> {
       // Returns the list of servers ATM knows about.
       // Prefers fleet config (FLEET_CONFIG env or fleet.json), falls back to env vars.
       if (url.pathname === '/fleet' && req.method === 'GET') {
+        const environmentFilterRaw = url.searchParams.get('environment')?.trim().toLowerCase() ?? '';
+        const includeTerminated =
+          (url.searchParams.get('includeTerminated') ?? '').toLowerCase() === 'true';
+        const requestedEnvironment =
+          environmentFilterRaw === 'all'
+            ? 'all'
+            : environmentFilterRaw === 'production' || environmentFilterRaw === 'staging'
+              ? environmentFilterRaw
+              : currentEnvironment;
+
+        const applyFleetFilters = (servers: FleetServer[]): FleetServer[] => {
+          const environmentScoped =
+            requestedEnvironment === 'all'
+              ? servers
+              : servers.filter((s) => s.environment === requestedEnvironment || s.role === 'atm');
+
+          if (includeTerminated) {
+            return environmentScoped;
+          }
+
+          const workerStates = idleMonitor.getWorkerStates();
+          const terminatedIds = new Set(
+            workerStates.filter((w) => w.ec2State === 'terminated').map((w) => w.serverId),
+          );
+          return environmentScoped.filter((s) => !terminatedIds.has(s.id));
+        };
+
         if (fleetServers.length > 0) {
-          return Response.json({ servers: fleetServers });
+          return Response.json({
+            servers: applyFleetFilters(fleetServers),
+            filter: {
+              environment: requestedEnvironment,
+              includeTerminated,
+              currentEnvironment,
+            },
+          });
         }
 
         // Fallback: build from env vars (legacy single-server mode)
-        const servers: Array<Record<string, unknown>> = [
+        const servers: FleetServer[] = [
           {
             id: 'atm-gw1',
             name: 'ATM Server',
@@ -870,7 +906,14 @@ async function handleRequest(req: Request): Promise<Response> {
           });
         }
 
-        return Response.json({ servers });
+        return Response.json({
+          servers: applyFleetFilters(servers),
+          filter: {
+            environment: requestedEnvironment,
+            includeTerminated,
+            currentEnvironment,
+          },
+        });
       }
 
       // ── POST /fleet/reload — Reload fleet config from disk ─────

@@ -15,7 +15,14 @@ interface FleetOverviewPageProps {
 }
 
 export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageProps) {
-  const { servers } = useFleet();
+  const {
+    servers,
+    selectedEnvironment,
+    setSelectedEnvironment,
+    includeTerminated,
+    setIncludeTerminated,
+    currentEnvironment,
+  } = useFleet();
   const [statuses, setStatuses] = useState<Record<string, ServerStatus>>({});
   const [idleStatus, setIdleStatus] = useState<IdleStatusResponse | null>(null);
 
@@ -69,11 +76,54 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
     }
   }
 
+  const isExpandedView = selectedEnvironment === 'all' || includeTerminated;
+  const runningServers: Server[] = [];
+  const stoppedServers: Server[] = [];
+  const terminatedServers: Server[] = [];
+
+  for (const server of servers) {
+    if (server.role !== 'ghosthands') {
+      runningServers.push(server);
+      continue;
+    }
+    const state = idleWorkerMap.get(server.id)?.ec2State;
+    if (state === 'terminated') {
+      terminatedServers.push(server);
+    } else if (state === 'stopped' || state === 'standby' || state === 'stopping' || state === 'shutting-down') {
+      stoppedServers.push(server);
+    } else {
+      runningServers.push(server);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gray-100">Fleet Overview</h1>
+        <div>
+          <h1 className="text-lg font-semibold text-gray-100">Fleet Overview</h1>
+          <p className="mt-1 text-xs text-gray-500">
+            Default view shows {currentEnvironment} and hides terminated workers.
+          </p>
+        </div>
         <div className="flex items-center gap-3">
+          <select
+            value={selectedEnvironment}
+            onChange={(e) => setSelectedEnvironment(e.target.value)}
+            className="rounded-md border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300"
+          >
+            <option value="current">Current env ({currentEnvironment})</option>
+            <option value="staging">Staging</option>
+            <option value="production">Production</option>
+            <option value="all">All environments</option>
+          </select>
+          <label className="flex items-center gap-2 text-xs text-gray-400">
+            <input
+              type="checkbox"
+              checked={includeTerminated}
+              onChange={(e) => setIncludeTerminated(e.target.checked)}
+            />
+            Show terminated
+          </label>
           {idleStatus?.enabled && (
             <span className="text-xs text-gray-500">
               Idle timeout: {Math.round((idleStatus.config.idleTimeoutMs) / 60000)}m
@@ -85,6 +135,60 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
         </div>
       </div>
 
+      {isExpandedView ? (
+        <div className="space-y-6">
+          <Section title="Running" servers={runningServers} statuses={statuses} idleWorkerMap={idleWorkerMap} idleConfig={idleStatus?.config ?? null} onSelectServer={onSelectServer} onRefresh={fetchAll} />
+          <Section title="Stopped" servers={stoppedServers} statuses={statuses} idleWorkerMap={idleWorkerMap} idleConfig={idleStatus?.config ?? null} onSelectServer={onSelectServer} onRefresh={fetchAll} />
+          {includeTerminated && (
+            <Section title="Terminated" servers={terminatedServers} statuses={statuses} idleWorkerMap={idleWorkerMap} idleConfig={idleStatus?.config ?? null} onSelectServer={onSelectServer} onRefresh={fetchAll} />
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {servers.map((s) => (
+            <ServerCard
+              key={s.id}
+              server={s}
+              status={statuses[s.id]}
+              idleWorker={idleWorkerMap.get(s.id) ?? null}
+              idleConfig={idleStatus?.config ?? null}
+              onClick={() => onSelectServer(s.id)}
+              onRefresh={fetchAll}
+            />
+          ))}
+        </div>
+      )}
+
+      {servers.length === 0 && (
+        <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-8 text-center text-gray-500">
+          No servers configured. Check ATM server environment variables.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Section({
+  title,
+  servers,
+  statuses,
+  idleWorkerMap,
+  idleConfig,
+  onSelectServer,
+  onRefresh,
+}: {
+  title: string;
+  servers: Server[];
+  statuses: Record<string, ServerStatus>;
+  idleWorkerMap: Map<string, IdleStatusWorker>;
+  idleConfig: { idleTimeoutMs: number; minRunning: number; pollIntervalMs: number } | null;
+  onSelectServer: (id: string) => void;
+  onRefresh: () => void;
+}) {
+  if (servers.length === 0) return null;
+  return (
+    <div>
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-400">{title}</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {servers.map((s) => (
           <ServerCard
@@ -92,18 +196,12 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
             server={s}
             status={statuses[s.id]}
             idleWorker={idleWorkerMap.get(s.id) ?? null}
-            idleConfig={idleStatus?.config ?? null}
+            idleConfig={idleConfig}
             onClick={() => onSelectServer(s.id)}
-            onRefresh={fetchAll}
+            onRefresh={onRefresh}
           />
         ))}
       </div>
-
-      {servers.length === 0 && (
-        <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-8 text-center text-gray-500">
-          No servers configured. Check ATM server environment variables.
-        </div>
-      )}
     </div>
   );
 }

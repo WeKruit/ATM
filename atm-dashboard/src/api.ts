@@ -42,6 +42,11 @@ export interface Server {
 
 export interface FleetConfig {
   servers: Server[];
+  filter?: {
+    environment: string;
+    includeTerminated: boolean;
+    currentEnvironment: string;
+  };
 }
 
 // ── Secrets types ───────────────────────────────────────────────

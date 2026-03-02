@@ -109,6 +109,29 @@ describe('ATM Server Security', () => {
           return withCors(Response.json({ enabled: true, workers: [] }), req, allowedOrigins);
         }
 
+        // /fleet — supports environment filter + includeTerminated toggle
+        if (url.pathname === '/fleet' && req.method === 'GET') {
+          const env = url.searchParams.get('environment') || 'staging';
+          const includeTerminated = url.searchParams.get('includeTerminated') === 'true';
+          const allServers = [
+            { id: 'atm-gw1', role: 'atm', environment: 'staging' },
+            { id: 'gh-stg-1', role: 'ghosthands', environment: 'staging', ec2State: 'running' },
+            { id: 'gh-prod-1', role: 'ghosthands', environment: 'production', ec2State: 'terminated' },
+          ];
+          const envScoped = env === 'all' ? allServers : allServers.filter((s) => s.environment === env || s.role === 'atm');
+          const servers = includeTerminated
+            ? envScoped
+            : envScoped.filter((s) => s.ec2State !== 'terminated');
+          return withCors(
+            Response.json({
+              servers,
+              filter: { environment: env, includeTerminated, currentEnvironment: 'staging' },
+            }),
+            req,
+            allowedOrigins,
+          );
+        }
+
         // /fleet/:id/workers — requires auth (proxied worker metadata)
         if (url.pathname.startsWith('/fleet/') && req.method === 'GET') {
           const rest = url.pathname.slice('/fleet/'.length);
@@ -297,6 +320,24 @@ describe('ATM Server Security', () => {
   // routing pattern (pathname matching → auth guard → response → withCors).
 
   describe('fleet proxy endpoint auth (integration)', () => {
+    test('GET /fleet defaults to staging scope and hides terminated', async () => {
+      const res = await fetch(`${baseUrl}/fleet`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.filter.environment).toBe('staging');
+      expect(body.filter.includeTerminated).toBe(false);
+      expect(body.servers.some((s: { id: string }) => s.id === 'gh-prod-1')).toBe(false);
+    });
+
+    test('GET /fleet supports all environments + includeTerminated=true', async () => {
+      const res = await fetch(`${baseUrl}/fleet?environment=all&includeTerminated=true`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.filter.environment).toBe('all');
+      expect(body.filter.includeTerminated).toBe(true);
+      expect(body.servers.some((s: { id: string }) => s.id === 'gh-prod-1')).toBe(true);
+    });
+
     test('GET /fleet/:id/workers returns 401 without secret', async () => {
       const res = await fetch(`${baseUrl}/fleet/gh-worker-1/workers`);
       expect(res.status).toBe(401);
