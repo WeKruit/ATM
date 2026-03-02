@@ -8,8 +8,8 @@
  *   GET  /health               — Returns worker health + active task count (no auth)
  *   GET  /metrics              — Returns system-level CPU/memory/disk stats (no auth)
  *   GET  /version              — Returns deploy server version + current image info
- *   GET  /containers           — Returns running Docker containers (no auth)
- *   GET  /workers              — Returns worker registry status (no auth)
+ *   GET  /containers           — Returns running Docker containers (requires X-Deploy-Secret)
+ *   GET  /workers              — Returns worker registry status (requires X-Deploy-Secret)
  *   POST /deploy               — Rolling deploy via Docker Engine API (requires X-Deploy-Secret)
  *   POST /drain                — Triggers graceful worker drain (requires X-Deploy-Secret)
  *   POST /cleanup              — Runs disk cleanup (Docker prune + tmp + logs) (requires X-Deploy-Secret)
@@ -17,6 +17,7 @@
  *   POST /admin/refresh-secrets — Re-fetch secrets from Infisical/AWS SM (requires X-Deploy-Secret)
  *   GET  /deploys              — List deploy history records (no auth)
  *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
+ *   GET  /secrets/ghosthands   — Fetch all GH secrets for Mac deploy (requires X-Deploy-Secret)
  *   GET  /secrets/status       — Infisical connection status (no auth)
  *   GET  /deploy/stream        — SSE stream for real-time deploy logs (no auth)
  *   GET  /kamal/validate       — Pre-deploy validation checks (no auth)
@@ -27,13 +28,22 @@
  *   POST /rollback/kamal       — Trigger Kamal rollback (requires X-Deploy-Secret)
  *   GET  /fleet                — Dynamic fleet server registry (no auth)
  *   POST /fleet/reload         — Reload fleet config from disk (requires X-Deploy-Secret)
- *   GET  /fleet/:id/*          — Smart proxy to fleet servers (no auth)
+ *   POST /fleet/:id/wake       — Wake a stopped EC2 worker (requires X-Deploy-Secret)
+ *   POST /fleet/:id/stop       — Stop a running EC2 worker (requires X-Deploy-Secret)
+ *   POST /fleet/wake           — Wake N stopped workers (requires X-Deploy-Secret)
+ *   GET  /fleet/idle-status    — EC2 idle monitor status (requires X-Deploy-Secret)
+ *   GET  /fleet/:id/health     — Proxied fleet health check (no auth)
+ *   GET  /fleet/:id/version    — Proxied fleet version info (no auth)
+ *   GET  /fleet/:id/metrics    — Proxied fleet system metrics (no auth)
+ *   GET  /fleet/:id/workers    — Proxied worker metadata (requires X-Deploy-Secret)
+ *   GET  /fleet/:id/*          — Smart proxy fallback (requires X-Deploy-Secret)
  *   GET  /dashboard            — Serve dashboard SPA (no auth)
  *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
  * Auth:
  *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
- *   GET endpoints are unauthenticated (monitoring/health checks).
+ *   GET endpoints are unauthenticated except /containers, /workers, /fleet/idle-status,
+ *   /fleet/:id/workers, and /fleet/:id/* fallback (all require X-Deploy-Secret).
  *
  * Secrets:
  *   On startup, tries Infisical first (self-hosted), falls back to AWS Secrets Manager
@@ -71,10 +81,13 @@ import { getEcrAuth, getEcrImageRef } from './ecr-auth';
 import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
-import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue } from './infisical-client';
+import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue, fetchSecretsForPath } from './infisical-client';
 import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal } from './kamal-runner';
 import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
+import * as idleMonitor from './ec2-idle-monitor';
+import { startInstance, stopInstance, describeInstance } from './ec2-client';
+import { enterStandby, exitStandby } from './asg-client';
 import path from 'node:path';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
@@ -135,6 +148,12 @@ const currentEnvironment: 'staging' | 'production' =
   (process.env.GH_ENVIRONMENT as 'staging' | 'production') ||
   (process.env.NODE_ENV === 'production' ? 'production' : 'staging');
 
+// ── EC2 Idle Monitor Config ──────────────────────────────────────────
+const EC2_IDLE_ENABLED = process.env.EC2_IDLE_ENABLED === 'true';
+const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '300000', 10);
+const EC2_MIN_RUNNING = parseInt(process.env.EC2_MIN_RUNNING || '0', 10);
+const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000', 10);
+
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
 
@@ -149,6 +168,7 @@ interface FleetServer {
   ip: string;
   type: string;
   role: string;
+  ec2InstanceId?: string;
 }
 
 let fleetServers: FleetServer[] = [];
@@ -178,7 +198,7 @@ function discoverFleetFromKamal(): FleetServer[] {
   if (!configDir) return [];
 
   const discovered: FleetServer[] = [];
-  const seenIps = new Set<string>();
+  const seenTargets = new Set<string>();
   let workerIndex = 1;
 
   for (const dest of ['staging', 'production']) {
@@ -189,8 +209,9 @@ function discoverFleetFromKamal(): FleetServer[] {
       // Collect all unique IPs from web + workers roles
       for (const role of Object.values(hosts)) {
         for (const ip of role) {
-          if (seenIps.has(ip)) continue;
-          seenIps.add(ip);
+          const dedupeKey = `${dest}:${ip}`;
+          if (seenTargets.has(dedupeKey)) continue;
+          seenTargets.add(dedupeKey);
           discovered.push({
             id: `gh-worker-${workerIndex}`,
             name: `GH Worker ${workerIndex}`,
@@ -489,16 +510,34 @@ async function executeDeploy(imageTag: string): Promise<DeployResult | DeployFai
   }
 }
 
-// ── CORS Headers ──────────────────────────────────────────────────
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Deploy-Secret',
-};
+// ── CORS ──────────────────────────────────────────────────────────
+const CORS_ORIGINS_DEFAULT = 'https://valet-web-stg.fly.dev,https://valet-web.fly.dev,http://localhost:5173';
+const corsOriginsRaw = process.env.CORS_ORIGINS || CORS_ORIGINS_DEFAULT;
+const allowedOrigins = new Set(corsOriginsRaw.split(',').map(s => s.trim()).filter(Boolean));
 
-/** Wraps a Response with CORS headers */
-function withCors(response: Response): Response {
-  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+if (allowedOrigins.size === 0) {
+  console.error('FATAL: CORS_ORIGINS resolved to empty set. Check env. Exiting.');
+  process.exit(1);
+}
+
+function getCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get('Origin');
+  if (!origin || !allowedOrigins.has(origin)) return {};
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': origin,
+    'Vary': 'Origin',
+  };
+  if (req.method === 'OPTIONS') {
+    headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Deploy-Secret';
+    headers['Access-Control-Max-Age'] = '86400';
+  }
+  return headers;
+}
+
+function withCors(response: Response, req: Request): Response {
+  const corsHeaders = getCorsHeaders(req);
+  for (const [key, value] of Object.entries(corsHeaders)) {
     response.headers.set(key, value);
   }
   return response;
@@ -573,18 +612,38 @@ function parseKamalHosts(yamlContent: string): Record<string, string[]> {
 
 if (typeof Bun !== 'undefined') {
   Bun.serve({
+    hostname: process.env.GH_DEPLOY_HOSTNAME || '0.0.0.0',
     port: DEPLOY_PORT,
+    idleTimeout: 255, // seconds; wake endpoint polls health for up to 120s
     async fetch(req) {
       // CORS preflight
       if (req.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: CORS_HEADERS });
+        return new Response(null, { status: 204, headers: getCorsHeaders(req) });
       }
       const response = await handleRequest(req);
-      return withCors(response);
+      return withCors(response, req);
     },
   });
 
   loadFleetConfig();
+
+  // Start EC2 idle monitor if enabled
+  if (EC2_IDLE_ENABLED) {
+    const fleetEntries = fleetServers.map(s => ({
+      id: s.id,
+      ip: s.ip,
+      role: s.role,
+      ec2InstanceId: s.ec2InstanceId,
+    }));
+    idleMonitor.start(fleetEntries, {
+      idleTimeoutMs: EC2_IDLE_TIMEOUT_MS,
+      minRunning: EC2_MIN_RUNNING,
+      pollIntervalMs: EC2_POLL_INTERVAL_MS,
+      workerPort: WORKER_PORT,
+    }).catch(err => console.error('[atm-api] Idle monitor start failed:', err));
+    console.log(`[atm-api] EC2 idle monitor enabled (timeout=${EC2_IDLE_TIMEOUT_MS}ms, minRunning=${EC2_MIN_RUNNING})`);
+  }
+
   console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
   console.log(`[atm-api] GH API: ${API_HOST}:${API_PORT}, Worker: ${WORKER_HOST}:${WORKER_PORT}`);
   console.log(`[atm-api] Environment: ${currentEnvironment}, Deploy method: Docker API`);
@@ -598,19 +657,32 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /health — Unauthenticated health check ──────────
       if (url.pathname === '/health' && req.method === 'GET') {
-        const apiHealth = await fetchJson(`http://${API_HOST}:${API_PORT}/health`);
-        const workerHealth = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/health`);
-        const workerStatus = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/status`);
+        // Check if any GH worker is running (skip health probes to stopped/standby workers)
+        const workerStates = idleMonitor.getWorkerStates();
+        const anyRunning = workerStates.some(w => w.ec2State === 'running');
+
+        let apiHealth: Record<string, unknown> | null = null;
+        let workerHealth: Record<string, unknown> | null = null;
+        let workerStatus: Record<string, unknown> | null = null;
+
+        if (anyRunning) {
+          // Find a running worker to probe
+          const running = workerStates.find(w => w.ec2State === 'running');
+          const probeIp = running?.ip ?? API_HOST;
+          apiHealth = await fetchJson(`http://${probeIp}:${API_PORT}/health`);
+          workerHealth = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/health`);
+          workerStatus = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/status`);
+        }
 
         const activeWorkers = (workerStatus?.active_jobs as number) ?? 0;
         const deploySafe = (workerHealth?.deploy_safe as boolean) ?? (activeWorkers === 0);
 
         return Response.json({
-          status: apiHealth ? 'ok' : 'degraded',
+          status: anyRunning ? (apiHealth ? 'ok' : 'degraded') : 'idle',
           activeWorkers,
           deploySafe,
-          apiHealthy: !!apiHealth,
-          workerStatus: workerHealth?.status ?? 'unknown',
+          apiHealthy: anyRunning ? !!apiHealth : false,
+          workerStatus: anyRunning ? (workerHealth?.status ?? 'unknown') : 'all-stopped',
           currentDeploy: currentDeploy
             ? { imageTag: currentDeploy.imageTag, elapsedMs: Date.now() - currentDeploy.startedAt }
             : null,
@@ -685,8 +757,14 @@ async function handleRequest(req: Request): Promise<Response> {
         });
       }
 
-      // ── GET /containers — Running Docker containers ───────────
+      // ── GET /containers — Running Docker containers (requires auth) ──
       if (url.pathname === '/containers' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         try {
           const resp = await fetch('http://localhost/containers/json', {
             // @ts-ignore — Bun supports unix sockets via fetch
@@ -716,8 +794,14 @@ async function handleRequest(req: Request): Promise<Response> {
         }
       }
 
-      // ── GET /workers — Worker registry status ─────────────────
+      // ── GET /workers — Worker registry status (requires auth) ────
       if (url.pathname === '/workers' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         const workerHealth = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/health`);
         const workerStatus = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/status`);
 
@@ -756,12 +840,46 @@ async function handleRequest(req: Request): Promise<Response> {
       // Returns the list of servers ATM knows about.
       // Prefers fleet config (FLEET_CONFIG env or fleet.json), falls back to env vars.
       if (url.pathname === '/fleet' && req.method === 'GET') {
+        const environmentFilterRaw = url.searchParams.get('environment')?.trim().toLowerCase() ?? '';
+        const includeTerminated =
+          (url.searchParams.get('includeTerminated') ?? '').toLowerCase() === 'true';
+        const requestedEnvironment =
+          environmentFilterRaw === 'all'
+            ? 'all'
+            : environmentFilterRaw === 'production' || environmentFilterRaw === 'staging'
+              ? environmentFilterRaw
+              : currentEnvironment;
+
+        const applyFleetFilters = (servers: FleetServer[]): FleetServer[] => {
+          const environmentScoped =
+            requestedEnvironment === 'all'
+              ? servers
+              : servers.filter((s) => s.environment === requestedEnvironment || s.role === 'atm');
+
+          if (includeTerminated) {
+            return environmentScoped;
+          }
+
+          const workerStates = idleMonitor.getWorkerStates();
+          const terminatedIds = new Set(
+            workerStates.filter((w) => w.ec2State === 'terminated').map((w) => w.serverId),
+          );
+          return environmentScoped.filter((s) => !terminatedIds.has(s.id));
+        };
+
         if (fleetServers.length > 0) {
-          return Response.json({ servers: fleetServers });
+          return Response.json({
+            servers: applyFleetFilters(fleetServers),
+            filter: {
+              environment: requestedEnvironment,
+              includeTerminated,
+              currentEnvironment,
+            },
+          });
         }
 
         // Fallback: build from env vars (legacy single-server mode)
-        const servers: Array<Record<string, unknown>> = [
+        const servers: FleetServer[] = [
           {
             id: 'atm-gw1',
             name: 'ATM Server',
@@ -788,7 +906,14 @@ async function handleRequest(req: Request): Promise<Response> {
           });
         }
 
-        return Response.json({ servers });
+        return Response.json({
+          servers: applyFleetFilters(servers),
+          filter: {
+            environment: requestedEnvironment,
+            includeTerminated,
+            currentEnvironment,
+          },
+        });
       }
 
       // ── POST /fleet/reload — Reload fleet config from disk ─────
@@ -801,6 +926,324 @@ async function handleRequest(req: Request): Promise<Response> {
         }
         const servers = loadFleetConfig();
         return Response.json({ success: true, count: servers.length, servers });
+      }
+
+      // ── GET /fleet/idle-status — EC2 idle monitor status (requires auth) ─────
+      if (url.pathname === '/fleet/idle-status' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        return Response.json({
+          enabled: EC2_IDLE_ENABLED,
+          config: {
+            idleTimeoutMs: EC2_IDLE_TIMEOUT_MS,
+            minRunning: EC2_MIN_RUNNING,
+            pollIntervalMs: EC2_POLL_INTERVAL_MS,
+          },
+          workers: idleMonitor.getWorkerStates().map(w => ({
+            serverId: w.serverId,
+            ip: w.ip,
+            instanceId: w.instanceId,
+            ec2State: w.ec2State,
+            activeJobs: w.activeJobs,
+            idleSinceMs: Date.now() - w.lastActiveAt,
+            transitioning: w.transitioning,
+          })),
+        });
+      }
+
+      // ── POST /fleet/wake — Wake N stopped workers ─────────────
+      if (url.pathname === '/fleet/wake' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        let count = 1;
+        try {
+          const body = await req.json() as { count?: number };
+          if (body.count && body.count > 0) count = body.count;
+        } catch {
+          // Default count=1
+        }
+
+        const states = idleMonitor.getWorkerStates();
+        const stopped = states.filter(
+          s => (s.ec2State === 'stopped' || s.ec2State === 'standby') && !s.transitioning && s.instanceId,
+        );
+
+        if (stopped.length === 0) {
+          // Check if any are waking
+          const waking = states.filter(s => s.transitioning || s.ec2State === 'pending');
+          if (waking.length > 0) {
+            return Response.json({ status: 'waking', waking: waking.map(w => w.serverId) });
+          }
+          return Response.json({ status: 'no_action', message: 'All workers are running or waking' });
+        }
+
+        const toWake = stopped.slice(0, count);
+        const results: { serverId: string; status: string; instanceId: string }[] = [];
+
+        for (const worker of toWake) {
+          idleMonitor.markTransitioning(worker.serverId, true);
+          try {
+            await startInstance(worker.instanceId!);
+            // Exit ASG standby if needed (non-fatal)
+            if (worker.inStandby && worker.asgName) {
+              try {
+                await exitStandby(worker.instanceId!, worker.asgName);
+                worker.inStandby = false;
+              } catch (err) {
+                console.warn(`[fleet/wake] exitStandby failed for ${worker.serverId} (non-fatal):`, err);
+              }
+            }
+            idleMonitor.updateWorkerEc2(worker.serverId, 'pending');
+            idleMonitor.markActive(worker.serverId);
+            idleMonitor.markTransitioning(worker.serverId, false);
+            results.push({ serverId: worker.serverId, status: 'starting', instanceId: worker.instanceId! });
+          } catch (err) {
+            idleMonitor.markTransitioning(worker.serverId, false);
+            const msg = err instanceof Error ? err.message : String(err);
+            results.push({ serverId: worker.serverId, status: 'error', instanceId: worker.instanceId! });
+            console.error(`[fleet/wake] Failed to start ${worker.serverId}:`, msg);
+          }
+        }
+
+        return Response.json({ status: 'waking', results });
+      }
+
+      // ── POST /fleet/:id/wake — Wake a specific worker ─────────
+      if (url.pathname.match(/^\/fleet\/[^/]+\/wake$/) && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        const serverId = url.pathname.split('/')[2];
+        const fleetEntry = fleetServers.find(s => s.id === serverId);
+        if (!fleetEntry) {
+          return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
+        }
+        if (fleetEntry.role !== 'ghosthands') {
+          return Response.json({ error: `Cannot wake non-GH server: ${serverId}` }, { status: 400 });
+        }
+
+        // Get the monitor state for this worker
+        const workerState = idleMonitor.getWorkerStates().find(s => s.serverId === serverId);
+        const instanceId = workerState?.instanceId || fleetEntry.ec2InstanceId;
+
+        if (!instanceId) {
+          return Response.json({ error: `No EC2 instance ID for ${serverId}` }, { status: 400 });
+        }
+
+        // Check current state
+        if (workerState?.transitioning) {
+          return Response.json({ status: 'waking', serverId, instanceId });
+        }
+
+        try {
+          const info = await describeInstance(instanceId);
+
+          if (info.state === 'running') {
+            // Verify it's actually healthy
+            try {
+              const healthResp = await fetch(
+                `http://${fleetEntry.ip}:${WORKER_PORT}/worker/health`,
+                { signal: AbortSignal.timeout(5000) },
+              );
+              if (healthResp.ok) {
+                return Response.json({ status: 'already_running', serverId, instanceId, ip: info.publicIp });
+              }
+            } catch {
+              // Running but not healthy yet — still return already_running
+            }
+            return Response.json({ status: 'already_running', serverId, instanceId, ip: info.publicIp });
+          }
+
+          if (info.state === 'stopping') {
+            return Response.json(
+              { error: 'Instance is stopping, retry later', state: info.state },
+              { status: 409 },
+            );
+          }
+
+          // Start the instance
+          if (workerState) idleMonitor.markTransitioning(serverId, true);
+          await startInstance(instanceId);
+          if (workerState) {
+            idleMonitor.updateWorkerEc2(serverId, 'pending');
+            idleMonitor.markActive(serverId);
+          }
+
+          // Poll until healthy (120s timeout)
+          const deadline = Date.now() + 120_000;
+          let healthy = false;
+          let newIp: string | null = null;
+
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 5000));
+            try {
+              const desc = await describeInstance(instanceId);
+              newIp = desc.publicIp;
+              if (desc.state === 'running' && newIp) {
+                // Update fleet IP if changed
+                if (newIp !== fleetEntry.ip) {
+                  fleetEntry.ip = newIp;
+                  if (workerState) idleMonitor.updateWorkerEc2(serverId, 'running', newIp);
+                }
+                // Check worker health
+                try {
+                  const healthResp = await fetch(
+                    `http://${newIp}:${WORKER_PORT}/worker/health`,
+                    { signal: AbortSignal.timeout(5000) },
+                  );
+                  if (healthResp.ok) {
+                    healthy = true;
+                    break;
+                  }
+                } catch {
+                  // Not healthy yet
+                }
+              }
+            } catch {
+              // EC2 not ready yet
+            }
+          }
+
+          // Exit ASG standby if needed (non-fatal)
+          let exitedStandby = false;
+          if (workerState?.inStandby && workerState.asgName) {
+            try {
+              await exitStandby(instanceId, workerState.asgName);
+              workerState.inStandby = false;
+              exitedStandby = true;
+            } catch (err) {
+              console.warn(`[fleet/${serverId}/wake] exitStandby failed (non-fatal):`, err);
+            }
+          }
+
+          if (workerState) idleMonitor.markTransitioning(serverId, false);
+
+          if (healthy) {
+            if (workerState) idleMonitor.updateWorkerEc2(serverId, 'running', newIp!);
+            return Response.json({ status: 'started', serverId, instanceId, ip: newIp, exitedStandby });
+          } else {
+            return Response.json({ status: 'started_unhealthy', serverId, instanceId, ip: newIp, exitedStandby });
+          }
+        } catch (err) {
+          if (workerState) idleMonitor.markTransitioning(serverId, false);
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[fleet/${serverId}/wake] Error:`, msg);
+          return Response.json({ error: msg }, { status: 500 });
+        }
+      }
+
+      // ── POST /fleet/:id/stop — Stop a running worker ──────────
+      if (url.pathname.match(/^\/fleet\/[^/]+\/stop$/) && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        const serverId = url.pathname.split('/')[2];
+        const fleetEntry = fleetServers.find(s => s.id === serverId);
+        if (!fleetEntry) {
+          return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
+        }
+        if (fleetEntry.role !== 'ghosthands') {
+          return Response.json({ error: `Cannot stop non-GH server: ${serverId}` }, { status: 400 });
+        }
+
+        const workerState = idleMonitor.getWorkerStates().find(s => s.serverId === serverId);
+        const instanceId = workerState?.instanceId || fleetEntry.ec2InstanceId;
+
+        if (!instanceId) {
+          return Response.json({ error: `No EC2 instance ID for ${serverId}` }, { status: 400 });
+        }
+
+        if (workerState?.transitioning) {
+          return Response.json(
+            { error: 'Instance is transitioning, retry later' },
+            { status: 409 },
+          );
+        }
+
+        try {
+          const info = await describeInstance(instanceId);
+
+          if (info.state === 'stopped' || info.state === 'stopping') {
+            return Response.json(
+              { error: `Instance is already ${info.state}`, state: info.state },
+              { status: 409 },
+            );
+          }
+
+          // Check for active jobs before stopping
+          if (workerState && workerState.activeJobs > 0) {
+            return Response.json(
+              { error: 'Worker has active jobs — drain first', activeJobs: workerState.activeJobs },
+              { status: 409 },
+            );
+          }
+
+          // Best-effort live health check for active jobs
+          try {
+            const healthResp = await fetch(
+              `http://${fleetEntry.ip}:${WORKER_PORT}/worker/health`,
+              { signal: AbortSignal.timeout(5000) },
+            );
+            if (healthResp.ok) {
+              const data = (await healthResp.json()) as { active_jobs?: number };
+              if (data.active_jobs && data.active_jobs > 0) {
+                return Response.json(
+                  { error: 'Worker has active jobs — drain first', activeJobs: data.active_jobs },
+                  { status: 409 },
+                );
+              }
+            }
+          } catch {
+            // Worker unreachable — safe to stop
+          }
+
+          if (workerState) idleMonitor.markTransitioning(serverId, true);
+
+          // Enter ASG standby first if ASG-managed
+          let enteredStandby = false;
+          if (workerState?.asgName && !workerState.inStandby) {
+            try {
+              await enterStandby(instanceId, workerState.asgName);
+              workerState.inStandby = true;
+              enteredStandby = true;
+            } catch (err) {
+              if (workerState) idleMonitor.markTransitioning(serverId, false);
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(`[fleet/${serverId}/stop] enterStandby failed:`, msg);
+              return Response.json({ error: `enterStandby failed: ${msg}` }, { status: 500 });
+            }
+          }
+
+          await stopInstance(instanceId);
+          if (workerState) {
+            idleMonitor.updateWorkerEc2(serverId, 'stopping');
+            idleMonitor.markTransitioning(serverId, false);
+          }
+
+          return Response.json({ status: 'stopping', serverId, instanceId, enteredStandby });
+        } catch (err) {
+          if (workerState) idleMonitor.markTransitioning(serverId, false);
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[fleet/${serverId}/stop] Error:`, msg);
+          return Response.json({ error: msg }, { status: 500 });
+        }
       }
 
       // ── GET /fleet/:id/* — Smart proxy to fleet servers ───────
@@ -830,7 +1273,22 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
         }
 
-        const serverIp = fleetEntry.ip;
+        // Fast-return for ALL endpoints when worker is stopped/standby (avoids timeout probing unreachable hosts)
+        const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
+        if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
+          return Response.json({
+            status: 'offline',
+            ec2State: workerState.ec2State,
+            activeWorkers: 0,
+            deploySafe: false,
+            apiHealthy: false,
+            workerStatus: 'unreachable',
+            currentDeploy: null,
+            uptimeMs: 0,
+          });
+        }
+
+        const serverIp = workerState?.ip ?? fleetEntry.ip;
         const ghApiBase = `http://${serverIp}:${API_PORT}`;
         const ghWorkerBase = `http://${serverIp}:${WORKER_PORT}`;
 
@@ -911,8 +1369,14 @@ async function handleRequest(req: Request): Promise<Response> {
           });
         }
 
-        // ── /fleet/:id/workers — Build Worker[] from GH worker endpoints ──
+        // ── /fleet/:id/workers — Build Worker[] from GH worker endpoints (requires auth) ──
         if (endpoint === '/workers') {
+          if (!verifySecret(req)) {
+            return Response.json(
+              { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+              { status: 401 },
+            );
+          }
           const [workerHealth, workerStatus] = await Promise.all([
             safeFetch<{ status: string; active_jobs: number; deploy_safe: boolean }>(
               `${ghWorkerBase}/worker/health`,
@@ -977,7 +1441,13 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json(getRecords(limit));
         }
 
-        // ── Fallback: dumb proxy for unknown sub-paths ──
+        // ── Fallback: dumb proxy for unknown sub-paths (requires auth) ──
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         const workerEndpoints = ['/worker/', '/workers'];
         const isWorkerEndpoint = workerEndpoints.some((p) => endpoint.startsWith(p));
         const targetBase = isWorkerEndpoint ? ghWorkerBase : ghApiBase;
@@ -1018,9 +1488,43 @@ async function handleRequest(req: Request): Promise<Response> {
         return Response.json(keys);
       }
 
+      // ── GET /secrets/ghosthands — Fetch all GH secrets for Mac deploy ──
+      // Optional query param: ?environment=staging (default: INFISICAL_ENVIRONMENT)
+      // Filters out EC2-specific keys not needed on Mac
+      if (url.pathname === '/secrets/ghosthands' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const environment = url.searchParams.get('environment') || undefined;
+        try {
+          const allSecrets = await fetchSecretsForPath('/ghosthands', environment);
+
+          // Filter out EC2-specific keys not needed on Mac
+          const EC2_ONLY_KEYS = ['AWS_ASG_NAME', 'AWS_LIFECYCLE_HOOK_NAME', 'ECR_REGISTRY', 'ECR_REPOSITORY', 'VNC_PW'];
+          const secrets: Record<string, string> = {};
+          for (const [key, value] of Object.entries(allSecrets)) {
+            if (!EC2_ONLY_KEYS.includes(key)) {
+              secrets[key] = value;
+            }
+          }
+
+          return Response.json({
+            secrets,
+            count: Object.keys(secrets).length,
+            environment: environment || process.env.INFISICAL_ENVIRONMENT || 'staging',
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 500 });
+        }
+      }
+
       // ── GET /secrets/:key — Get a single secret value (authenticated) ──
       // Optional query param: ?path=/valet (default: /)
-      if (url.pathname.startsWith('/secrets/') && url.pathname !== '/secrets/status' && url.pathname !== '/secrets/list' && req.method === 'GET') {
+      if (url.pathname.startsWith('/secrets/') && url.pathname !== '/secrets/status' && url.pathname !== '/secrets/list' && url.pathname !== '/secrets/ghosthands' && req.method === 'GET') {
         if (!verifySecret(req)) {
           return Response.json(
             { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },

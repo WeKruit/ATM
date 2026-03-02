@@ -37,7 +37,7 @@ function MetricBar({ label, value, total, unit, percent }: { label: string; valu
 }
 
 export default function OverviewPage() {
-  const { activeServer } = useFleet();
+  const { activeServer, selectedEnvironment, includeTerminated } = useFleet();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [version, setVersion] = useState<VersionResponse | null>(null);
@@ -77,6 +77,9 @@ export default function OverviewPage() {
     return (
       <div className="text-center py-20 text-gray-500">
         Select a server to view its overview.
+        <p className="mt-2 text-xs text-gray-600">
+          Current fleet filters: environment={selectedEnvironment}, includeTerminated={String(includeTerminated)}
+        </p>
       </div>
     );
   }
