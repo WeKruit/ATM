@@ -8,8 +8,8 @@
  *   GET  /health               — Returns worker health + active task count (no auth)
  *   GET  /metrics              — Returns system-level CPU/memory/disk stats (no auth)
  *   GET  /version              — Returns deploy server version + current image info
- *   GET  /containers           — Returns running Docker containers (no auth)
- *   GET  /workers              — Returns worker registry status (no auth)
+ *   GET  /containers           — Returns running Docker containers (requires X-Deploy-Secret)
+ *   GET  /workers              — Returns worker registry status (requires X-Deploy-Secret)
  *   POST /deploy               — Rolling deploy via Docker Engine API (requires X-Deploy-Secret)
  *   POST /drain                — Triggers graceful worker drain (requires X-Deploy-Secret)
  *   POST /cleanup              — Runs disk cleanup (Docker prune + tmp + logs) (requires X-Deploy-Secret)
@@ -31,14 +31,18 @@
  *   POST /fleet/:id/wake       — Wake a stopped EC2 worker (requires X-Deploy-Secret)
  *   POST /fleet/:id/stop       — Stop a running EC2 worker (requires X-Deploy-Secret)
  *   POST /fleet/wake           — Wake N stopped workers (requires X-Deploy-Secret)
- *   GET  /fleet/idle-status    — EC2 idle monitor status (no auth)
- *   GET  /fleet/:id/*          — Smart proxy to fleet servers (no auth)
+ *   GET  /fleet/idle-status    — EC2 idle monitor status (requires X-Deploy-Secret)
+ *   GET  /fleet/:id/health     — Proxied fleet health check (no auth)
+ *   GET  /fleet/:id/version    — Proxied fleet version info (no auth)
+ *   GET  /fleet/:id/metrics    — Proxied fleet system metrics (no auth)
+ *   GET  /fleet/:id/workers    — Proxied worker metadata (requires X-Deploy-Secret)
+ *   GET  /fleet/:id/*          — Smart proxy fallback (requires X-Deploy-Secret)
  *   GET  /dashboard            — Serve dashboard SPA (no auth)
  *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
  * Auth:
  *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
- *   GET endpoints are unauthenticated (monitoring/health checks).
+ *   GET endpoints are unauthenticated except /containers and /workers (which require X-Deploy-Secret).
  *
  * Secrets:
  *   On startup, tries Infisical first (self-hosted), falls back to AWS Secrets Manager
@@ -504,16 +508,34 @@ async function executeDeploy(imageTag: string): Promise<DeployResult | DeployFai
   }
 }
 
-// ── CORS Headers ──────────────────────────────────────────────────
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Deploy-Secret',
-};
+// ── CORS ──────────────────────────────────────────────────────────
+const CORS_ORIGINS_DEFAULT = 'https://valet-web-stg.fly.dev,https://valet-web.fly.dev,http://localhost:5173';
+const corsOriginsRaw = process.env.CORS_ORIGINS || CORS_ORIGINS_DEFAULT;
+const allowedOrigins = new Set(corsOriginsRaw.split(',').map(s => s.trim()).filter(Boolean));
 
-/** Wraps a Response with CORS headers */
-function withCors(response: Response): Response {
-  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+if (allowedOrigins.size === 0) {
+  console.error('FATAL: CORS_ORIGINS resolved to empty set. Check env. Exiting.');
+  process.exit(1);
+}
+
+function getCorsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get('Origin');
+  if (!origin || !allowedOrigins.has(origin)) return {};
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': origin,
+    'Vary': 'Origin',
+  };
+  if (req.method === 'OPTIONS') {
+    headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Deploy-Secret';
+    headers['Access-Control-Max-Age'] = '86400';
+  }
+  return headers;
+}
+
+function withCors(response: Response, req: Request): Response {
+  const corsHeaders = getCorsHeaders(req);
+  for (const [key, value] of Object.entries(corsHeaders)) {
     response.headers.set(key, value);
   }
   return response;
@@ -588,15 +610,16 @@ function parseKamalHosts(yamlContent: string): Record<string, string[]> {
 
 if (typeof Bun !== 'undefined') {
   Bun.serve({
+    hostname: process.env.GH_DEPLOY_HOSTNAME || '0.0.0.0',
     port: DEPLOY_PORT,
     idleTimeout: 255, // seconds; wake endpoint polls health for up to 120s
     async fetch(req) {
       // CORS preflight
       if (req.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: CORS_HEADERS });
+        return new Response(null, { status: 204, headers: getCorsHeaders(req) });
       }
       const response = await handleRequest(req);
-      return withCors(response);
+      return withCors(response, req);
     },
   });
 
@@ -732,8 +755,14 @@ async function handleRequest(req: Request): Promise<Response> {
         });
       }
 
-      // ── GET /containers — Running Docker containers ───────────
+      // ── GET /containers — Running Docker containers (requires auth) ──
       if (url.pathname === '/containers' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         try {
           const resp = await fetch('http://localhost/containers/json', {
             // @ts-ignore — Bun supports unix sockets via fetch
@@ -763,8 +792,14 @@ async function handleRequest(req: Request): Promise<Response> {
         }
       }
 
-      // ── GET /workers — Worker registry status ─────────────────
+      // ── GET /workers — Worker registry status (requires auth) ────
       if (url.pathname === '/workers' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         const workerHealth = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/health`);
         const workerStatus = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/status`);
 
@@ -850,8 +885,14 @@ async function handleRequest(req: Request): Promise<Response> {
         return Response.json({ success: true, count: servers.length, servers });
       }
 
-      // ── GET /fleet/idle-status — EC2 idle monitor status ─────
+      // ── GET /fleet/idle-status — EC2 idle monitor status (requires auth) ─────
       if (url.pathname === '/fleet/idle-status' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         return Response.json({
           enabled: EC2_IDLE_ENABLED,
           config: {
@@ -1285,8 +1326,14 @@ async function handleRequest(req: Request): Promise<Response> {
           });
         }
 
-        // ── /fleet/:id/workers — Build Worker[] from GH worker endpoints ──
+        // ── /fleet/:id/workers — Build Worker[] from GH worker endpoints (requires auth) ──
         if (endpoint === '/workers') {
+          if (!verifySecret(req)) {
+            return Response.json(
+              { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+              { status: 401 },
+            );
+          }
           const [workerHealth, workerStatus] = await Promise.all([
             safeFetch<{ status: string; active_jobs: number; deploy_safe: boolean }>(
               `${ghWorkerBase}/worker/health`,
@@ -1351,7 +1398,13 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json(getRecords(limit));
         }
 
-        // ── Fallback: dumb proxy for unknown sub-paths ──
+        // ── Fallback: dumb proxy for unknown sub-paths (requires auth) ──
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         const workerEndpoints = ['/worker/', '/workers'];
         const isWorkerEndpoint = workerEndpoints.some((p) => endpoint.startsWith(p));
         const targetBase = isWorkerEndpoint ? ghWorkerBase : ghApiBase;
