@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { get } from '../api';
+import { getWithAuth } from '../api';
 import type { Container, Worker } from '../api';
 import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
@@ -101,18 +101,32 @@ export default function FleetPage() {
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState(false);
 
   const base = activeServer?.host ?? '';
 
   const fetchAll = useCallback(async () => {
     if (!activeServer) return;
+    const secret = sessionStorage.getItem('atm-deploy-secret') || '';
     try {
       const [c, w] = await Promise.all([
-        get<Container[]>('/containers', base).catch(() => [] as Container[]),
-        get<Worker[]>('/workers', base).catch(() => [] as Worker[]),
+        secret
+          ? getWithAuth<Container[]>('/containers', secret, base).catch((err) => {
+              if (err?.message?.startsWith('401')) setAuthError(true);
+              return [] as Container[];
+            })
+          : Promise.resolve([] as Container[]),
+        secret
+          ? getWithAuth<Worker[]>('/workers', secret, base).catch((err) => {
+              if (err?.message?.startsWith('401')) setAuthError(true);
+              return [] as Worker[];
+            })
+          : Promise.resolve([] as Worker[]),
       ]);
       setContainers(c);
       setWorkers(w);
+      if (secret) setAuthError(false);
+      else setAuthError(true);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch');
@@ -151,6 +165,12 @@ export default function FleetPage() {
           Refresh
         </button>
       </div>
+
+      {authError && (
+        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm text-yellow-400">
+          Authentication required — enter your deploy secret in the header bar to view containers and workers.
+        </div>
+      )}
 
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">

@@ -155,11 +155,21 @@ export async function start(
       state.asgName = asgInfo.autoScalingGroupName;
       if (asgInfo.lifecycleState === 'Standby') {
         state.inStandby = true;
-        state.ec2State = 'standby';
+        // ASG says Standby — but what's the actual EC2 state?
+        // If EC2 is stopped, report as 'stopped' (not 'standby')
+        // inStandby flag tracks ASG membership independently
+        if (state.ec2State === 'stopped' || state.ec2State === 'stopping') {
+          // Keep ec2State as-is — it's the real EC2 state
+          console.log(
+            `[idle-monitor] ${state.serverId} is in ASG Standby but EC2 state is ${state.ec2State}`,
+          );
+        } else {
+          state.ec2State = 'standby';
+        }
       }
       if (state.asgName) {
         console.log(
-          `[idle-monitor] ${state.serverId} (${state.instanceId}) is ASG-managed: ${state.asgName}, lifecycle=${asgInfo.lifecycleState}`,
+          `[idle-monitor] ${state.serverId} (${state.instanceId}) is ASG-managed: ${state.asgName}, lifecycle=${asgInfo.lifecycleState}, ec2State=${state.ec2State}`,
         );
       }
     } catch (err) {
@@ -223,8 +233,36 @@ export async function pollWorkerHealth(): Promise<void> {
   const f = getFetch();
 
   for (const state of workerStates.values()) {
-    // Skip workers we know are stopped or in standby
-    if (state.ec2State === 'stopped' || state.ec2State === 'stopping' || state.ec2State === 'standby') continue;
+    // For transitional/offline states, poll EC2 to catch state changes
+    // (e.g. stopping → stopped, pending → running, standby+stopped → stopped)
+    if (state.ec2State === 'stopped' || state.ec2State === 'stopping' || state.ec2State === 'standby' || state.ec2State === 'pending') {
+      if (state.instanceId) {
+        try {
+          const info = await describeInstance(state.instanceId);
+          const prevState = state.ec2State;
+          if (info.state === 'running') {
+            state.ec2State = 'running';
+          } else if (info.state === 'stopped') {
+            state.ec2State = 'stopped';
+          } else {
+            state.ec2State = info.state;
+          }
+          if (info.publicIp && info.publicIp !== state.ip) {
+            console.log(`[idle-monitor] IP changed for ${state.serverId}: ${state.ip} → ${info.publicIp}`);
+            state.ip = info.publicIp;
+          }
+          if (prevState !== state.ec2State) {
+            console.log(`[idle-monitor] ${state.serverId} state transition: ${prevState} → ${state.ec2State}`);
+          }
+          // If the instance just came up, try to poll health below
+          if (state.ec2State !== 'running') continue;
+        } catch {
+          continue; // Can't reach EC2 API, skip
+        }
+      } else {
+        continue;
+      }
+    }
 
     try {
       const resp = await f(`http://${state.ip}:${config.workerPort}/worker/health`, {

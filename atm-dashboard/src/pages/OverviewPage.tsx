@@ -58,10 +58,16 @@ export default function OverviewPage() {
         get<MetricsResponse>('/metrics', base).catch(() => null),
         get<VersionResponse>('/version', base).catch(() => null),
       ];
-      // Fetch idle-status for GH workers (always from ATM origin, not proxied)
+      // Fetch idle-status for GH workers (always from ATM origin, requires auth)
       if (isGh) {
+        const idleSecret = sessionStorage.getItem('atm-deploy-secret') || '';
         fetches.push(
-          get<IdleStatusResponse>('/fleet/idle-status').catch(() => null),
+          idleSecret
+            ? fetch('/fleet/idle-status', {
+                signal: AbortSignal.timeout(10000),
+                headers: { 'X-Deploy-Secret': idleSecret },
+              }).then((r) => r.ok ? r.json() : null).catch(() => null)
+            : Promise.resolve(null),
         );
       }
       const [h, m, v, idle] = await Promise.all(fetches) as [

@@ -39,9 +39,13 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
       );
     }
 
-    // Fetch idle-status from ATM (same origin)
+    // Fetch idle-status from ATM (same origin, requires auth)
+    const idleSecret = sessionStorage.getItem('atm-deploy-secret') || '';
     fetches.push(
-      fetch('/fleet/idle-status', { signal: AbortSignal.timeout(10000) })
+      fetch('/fleet/idle-status', {
+        signal: AbortSignal.timeout(10000),
+        headers: idleSecret ? { 'X-Deploy-Secret': idleSecret } : {},
+      })
         .then((r) => r.ok ? r.json() : null)
         .then((data) => setIdleStatus(data))
         .catch(() => setIdleStatus(null)),
