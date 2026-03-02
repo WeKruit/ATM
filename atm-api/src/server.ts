@@ -1259,6 +1259,15 @@ async function handleRequest(req: Request): Promise<Response> {
         const serverId = rest.slice(0, slashIdx);
         const endpoint = rest.slice(slashIdx); // "/health"
 
+        // Fleet proxy endpoints expose worker IPs, system metrics, and build metadata.
+        // Require deploy secret auth now that port 8080 is open to 0.0.0.0/0.
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
         // Self-proxy for ATM's own server
         if (serverId === 'atm-gw1') {
           const selfUrl = new URL(endpoint + url.search, req.url);
@@ -1345,8 +1354,9 @@ async function handleRequest(req: Request): Promise<Response> {
           const versionInfo = await safeFetch<{
             version?: string;
             commit_sha?: string;
+            image_tag?: string;
             build_time?: string;
-            uptime?: number;
+            uptime_ms?: number;
           }>(`${ghApiBase}/health/version`);
 
           const ghInfo = apiHealth
@@ -1354,9 +1364,9 @@ async function handleRequest(req: Request): Promise<Response> {
                 service: apiHealth.service ?? 'ghosthands',
                 environment: apiHealth.environment ?? currentEnvironment,
                 commit_sha: versionInfo?.commit_sha ?? apiHealth.commit_sha ?? 'unknown',
-                image_tag: process.env.ECR_IMAGE || 'unknown',
+                image_tag: versionInfo?.image_tag ?? process.env.ECR_IMAGE ?? 'unknown',
                 build_time: versionInfo?.build_time ?? apiHealth.timestamp ?? '',
-                uptime_ms: versionInfo?.uptime ?? 0,
+                uptime_ms: versionInfo?.uptime_ms ?? 0,
                 node_env: apiHealth.environment ?? currentEnvironment,
               }
             : { status: 'unreachable' };

@@ -10,7 +10,11 @@ export default function ServerSelector() {
       const results: Record<string, boolean> = {};
       for (const s of servers) {
         try {
-          const res = await fetch(`${s.host}/health`, { signal: AbortSignal.timeout(3000) });
+          const secret = sessionStorage.getItem('atm-deploy-secret') || '';
+          const res = await fetch(`${s.host}/health`, {
+            signal: AbortSignal.timeout(3000),
+            headers: secret ? { 'X-Deploy-Secret': secret } : {},
+          });
           results[s.id] = res.ok;
         } catch {
           results[s.id] = false;
