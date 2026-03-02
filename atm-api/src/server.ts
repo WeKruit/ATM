@@ -1285,6 +1285,10 @@ async function handleRequest(req: Request): Promise<Response> {
         // Fast-return for ALL endpoints when worker is stopped/standby (avoids timeout probing unreachable hosts)
         const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
         if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
+          // Array-shaped endpoints must return [] to match VALET's expected response types
+          if (endpoint === '/workers' || endpoint === '/containers') {
+            return Response.json([]);
+          }
           return Response.json({
             status: 'offline',
             ec2State: workerState.ec2State,
