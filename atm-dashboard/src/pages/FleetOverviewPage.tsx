@@ -30,13 +30,16 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
     const results: Record<string, ServerStatus> = {};
     const fetches: Promise<void>[] = [];
 
+    const secret = sessionStorage.getItem('atm-deploy-secret') || '';
+    const authHeaders: HeadersInit = secret ? { 'X-Deploy-Secret': secret } : {};
+
     for (const s of servers) {
       fetches.push(
         (async () => {
           try {
             const [healthRes, metricsRes] = await Promise.all([
-              fetch(`${s.host}/health`, { signal: AbortSignal.timeout(10000) }).then((r) => r.ok ? r.json() : null).catch(() => null),
-              fetch(`${s.host}/metrics`, { signal: AbortSignal.timeout(10000) }).then((r) => r.ok ? r.json() : null).catch(() => null),
+              fetch(`${s.host}/health`, { signal: AbortSignal.timeout(10000), headers: authHeaders }).then((r) => r.ok ? r.json() : null).catch(() => null),
+              fetch(`${s.host}/metrics`, { signal: AbortSignal.timeout(10000), headers: authHeaders }).then((r) => r.ok ? r.json() : null).catch(() => null),
             ]);
             results[s.id] = { health: healthRes, metrics: metricsRes, reachable: !!healthRes };
           } catch {
@@ -47,7 +50,7 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
     }
 
     // Fetch idle-status from ATM (same origin, requires auth)
-    const idleSecret = sessionStorage.getItem('atm-deploy-secret') || '';
+    const idleSecret = secret;
     fetches.push(
       fetch('/fleet/idle-status', {
         signal: AbortSignal.timeout(10000),

@@ -75,6 +75,7 @@ export interface HealthResponse {
 }
 
 export interface MetricsResponse {
+  available: boolean;
   cpu: { usagePercent: number; cores: number };
   memory: { usedMb: number; totalMb: number; usagePercent: number };
   disk: { usedGb: number; totalGb: number; usagePercent: number };

@@ -4,6 +4,7 @@ import type { Container, Worker } from '../api';
 import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 import DataTable, { type Column } from '../components/DataTable';
+import { formatUptime } from '../utils/format';
 
 const containerColumns: Column<Container>[] = [
   {
@@ -91,7 +92,7 @@ const workerColumns: Column<Worker>[] = [
     key: 'uptime',
     label: 'Uptime',
     align: 'right' as const,
-    render: (row) => <span className="text-gray-400 text-xs">{row.uptime}s</span>,
+    render: (row) => <span className="text-gray-400 text-xs">{formatUptime(Number(row.uptime))}</span>,
   },
 ];
 

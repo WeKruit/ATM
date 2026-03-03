@@ -1259,6 +1259,15 @@ async function handleRequest(req: Request): Promise<Response> {
         const serverId = rest.slice(0, slashIdx);
         const endpoint = rest.slice(slashIdx); // "/health"
 
+        // Fleet proxy endpoints expose worker IPs, system metrics, and build metadata.
+        // Require deploy secret auth now that port 8080 is open to 0.0.0.0/0.
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
         // Self-proxy for ATM's own server
         if (serverId === 'atm-gw1') {
           const selfUrl = new URL(endpoint + url.search, req.url);
@@ -1276,6 +1285,10 @@ async function handleRequest(req: Request): Promise<Response> {
         // Fast-return for ALL endpoints when worker is stopped/standby (avoids timeout probing unreachable hosts)
         const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
         if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
+          // Array-shaped endpoints must return [] to match VALET's expected response types
+          if (endpoint === '/workers' || endpoint === '/containers') {
+            return Response.json([]);
+          }
           return Response.json({
             status: 'offline',
             ec2State: workerState.ec2State,
@@ -1345,8 +1358,9 @@ async function handleRequest(req: Request): Promise<Response> {
           const versionInfo = await safeFetch<{
             version?: string;
             commit_sha?: string;
+            image_tag?: string;
             build_time?: string;
-            uptime?: number;
+            uptime_ms?: number;
           }>(`${ghApiBase}/health/version`);
 
           const ghInfo = apiHealth
@@ -1354,9 +1368,9 @@ async function handleRequest(req: Request): Promise<Response> {
                 service: apiHealth.service ?? 'ghosthands',
                 environment: apiHealth.environment ?? currentEnvironment,
                 commit_sha: versionInfo?.commit_sha ?? apiHealth.commit_sha ?? 'unknown',
-                image_tag: process.env.ECR_IMAGE || 'unknown',
+                image_tag: versionInfo?.image_tag ?? process.env.ECR_IMAGE ?? 'unknown',
                 build_time: versionInfo?.build_time ?? apiHealth.timestamp ?? '',
-                uptime_ms: versionInfo?.uptime ?? 0,
+                uptime_ms: versionInfo?.uptime_ms ?? 0,
                 node_env: apiHealth.environment ?? currentEnvironment,
               }
             : { status: 'unreachable' };
@@ -1404,7 +1418,7 @@ async function handleRequest(req: Request): Promise<Response> {
             status: workerHealth?.status ?? (workerStatus?.is_draining ? 'draining' : workerStatus?.is_running ? 'idle' : 'offline'),
             activeJobs: workerStatus?.active_jobs ?? workerHealth?.active_jobs ?? 0,
             statusPort: WORKER_PORT,
-            uptime: String(workerStatus?.uptime_ms ?? 0),
+            uptime: String(Math.floor((workerStatus?.uptime_ms ?? 0) / 1000)),
             image: process.env.ECR_IMAGE || 'unknown',
           };
 
@@ -1419,14 +1433,11 @@ async function handleRequest(req: Request): Promise<Response> {
             disk: { usedGb: number; totalGb: number; usagePercent: number };
           }>(`${ghApiBase}/health/system`);
 
-          if (sysMetrics) {
-            return Response.json(sysMetrics);
-          }
-
           return Response.json({
-            cpu: { usagePercent: 0, cores: 0 },
-            memory: { usedMb: 0, totalMb: 0, usagePercent: 0 },
-            disk: { usedGb: 0, totalGb: 0, usagePercent: 0 },
+            available: sysMetrics !== null,
+            cpu: sysMetrics?.cpu ?? { usagePercent: 0, cores: 0 },
+            memory: sysMetrics?.memory ?? { usedMb: 0, totalMb: 0, usagePercent: 0 },
+            disk: sysMetrics?.disk ?? { usedGb: 0, totalGb: 0, usagePercent: 0 },
           });
         }
 
