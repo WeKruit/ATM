@@ -105,3 +105,30 @@ export async function describeInstancesByIps(ips: string[]): Promise<Ec2Instance
   }
   return instances;
 }
+
+/**
+ * Discover GH instances by ASG tag (aws:autoscaling:groupName).
+ * Returns all instances in the ASG that are not terminated.
+ */
+export async function discoverGhInstancesByAsgTag(
+  asgName: string,
+): Promise<Ec2InstanceInfo[]> {
+  const command = new DescribeInstancesCommand({
+    Filters: [
+      { Name: 'tag:aws:autoscaling:groupName', Values: [asgName] },
+      { Name: 'instance-state-name', Values: ['running', 'stopped', 'stopping', 'pending'] },
+    ],
+  });
+  const result = (await getSend()(command)) as DescribeInstancesCommandOutput;
+  const instances: Ec2InstanceInfo[] = [];
+  for (const reservation of result.Reservations ?? []) {
+    for (const instance of reservation.Instances ?? []) {
+      instances.push({
+        instanceId: instance.InstanceId ?? '',
+        state: (instance.State?.Name as Ec2InstanceInfo['state']) ?? 'unknown',
+        publicIp: instance.PublicIpAddress ?? null,
+      });
+    }
+  }
+  return instances;
+}
