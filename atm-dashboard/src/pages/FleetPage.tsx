@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { get } from '../api';
+import { getWithAuth } from '../api';
 import type { Container, Worker } from '../api';
 import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
@@ -108,9 +108,10 @@ export default function FleetPage() {
   const fetchAll = useCallback(async () => {
     if (!activeServer) return;
     try {
+      const secret = sessionStorage.getItem('atm-deploy-secret') || '';
       const [c, w] = await Promise.all([
-        get<Container[]>('/containers', base).catch(() => [] as Container[]),
-        get<Worker[]>('/workers', base).catch(() => [] as Worker[]),
+        getWithAuth<Container[]>('/containers', secret, base).catch(() => [] as Container[]),
+        getWithAuth<Worker[]>('/workers', secret, base).catch(() => [] as Worker[]),
       ]);
       setContainers(c);
       setWorkers(w);
