@@ -300,22 +300,29 @@ async function loadFleetConfig(): Promise<FleetServer[]> {
   }
 
   // Priority 2: EC2 ASG tag discovery (dynamic, always current)
+  // When AWS_ASG_NAME is set, EC2 is the SOLE authority for GH workers.
+  // An empty result means zero GH workers — do NOT fall back to Kamal.
+  // An error means discovery is degraded — surface zero GH workers, not stale Kamal data.
   const asgName = process.env.AWS_ASG_NAME;
   if (asgName) {
+    const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
     try {
       const ec2Hosts = await discoverFleetFromEc2(asgName);
+      fleetServers = [...nonGhEntries, ...ec2Hosts];
       if (ec2Hosts.length > 0) {
-        const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
-        fleetServers = [...nonGhEntries, ...ec2Hosts];
         console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + ${ec2Hosts.length} from EC2 ASG discovery`);
-        return fleetServers;
+      } else {
+        console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + 0 GH workers (ASG ${asgName} is empty)`);
       }
     } catch (err) {
-      console.warn('[atm-api] EC2 fleet discovery failed, falling back to Kamal:', err);
+      // EC2 API error — surface zero GH workers, not stale Kamal ghosts
+      fleetServers = [...nonGhEntries];
+      console.error(`[atm-api] EC2 fleet discovery failed — 0 GH workers (not falling back to Kamal):`, err);
     }
+    return fleetServers;
   }
 
-  // Priority 3: Kamal auto-discovery (static fallback for non-ASG setups)
+  // Priority 3: Kamal auto-discovery (only when ASG mode is NOT configured)
   const kamalHosts = discoverFleetFromKamal();
 
   if (kamalHosts.length > 0) {
@@ -918,8 +925,12 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 401 },
           );
         }
-        const workerHealth = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/health`);
-        const workerStatus = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/status`);
+        // Resolve worker IP dynamically: fleet → idle monitor → WORKER_HOST fallback
+        const liveGhFleet = fleetServers.find(s => s.role === 'ghosthands' && s.ip);
+        const liveIdleWorker = idleMonitor.getWorkerStates().find(w => w.ec2State === 'running' && w.ip);
+        const workerProbeHost = liveIdleWorker?.ip ?? liveGhFleet?.ip ?? WORKER_HOST;
+        const workerHealth = await fetchJson(`http://${workerProbeHost}:${WORKER_PORT}/worker/health`);
+        const workerStatus = await fetchJson(`http://${workerProbeHost}:${WORKER_PORT}/worker/status`);
 
         const workerId = (workerHealth?.worker_id ?? workerStatus?.worker_id ?? 'unknown') as string;
         const uptimeMs = (workerHealth?.uptime as number) ?? 0;
@@ -1003,6 +1014,7 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 401 },
           );
         }
+        ec2FleetCache = null; // Force fresh EC2 discovery
         const servers = await loadFleetConfig();
         return Response.json({ success: true, count: servers.length, servers });
       }
@@ -1751,7 +1763,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
         console.log('[atm-api] Drain requested');
         try {
-          await drainService(`http://${WORKER_HOST}:${WORKER_PORT}/drain`, 60_000);
+          const drainGhFleet = fleetServers.find(s => s.role === 'ghosthands' && s.ip);
+          const drainIdleWorker = idleMonitor.getWorkerStates().find(w => w.ec2State === 'running' && w.ip);
+          const drainHost = drainIdleWorker?.ip ?? drainGhFleet?.ip ?? WORKER_HOST;
+          await drainService(`http://${drainHost}:${WORKER_PORT}/drain`, 60_000);
           return Response.json({ success: true, message: 'Drain complete' });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
