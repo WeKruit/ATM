@@ -86,7 +86,7 @@ import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailab
 import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
 import * as idleMonitor from './ec2-idle-monitor';
-import { startInstance, stopInstance, describeInstance } from './ec2-client';
+import { startInstance, stopInstance, describeInstance, discoverGhInstancesByAsgTag } from './ec2-client';
 import { enterStandby, exitStandby } from './asg-client';
 import path from 'node:path';
 
@@ -233,7 +233,46 @@ function discoverFleetFromKamal(): FleetServer[] {
   return discovered;
 }
 
-function loadFleetConfig(): FleetServer[] {
+/**
+ * Derive a stable fleet ID from an EC2 instance ID.
+ * e.g. "i-0de0d236d543467f0" → "gh-d543467f0" (last 9 hex chars)
+ * Stable across ATM restarts. Unique per instance.
+ */
+function deriveFleetId(instanceId: string): string {
+  const stripped = instanceId.replace(/^i-/, '');
+  const suffix = stripped.slice(-9);
+  return `gh-${suffix}`;
+}
+
+const EC2_FLEET_CACHE_TTL_MS = 30_000; // 30 seconds
+let ec2FleetCache: { data: FleetServer[]; expiresAt: number } | null = null;
+
+async function discoverFleetFromEc2(asgName: string): Promise<FleetServer[]> {
+  if (ec2FleetCache && ec2FleetCache.expiresAt > Date.now()) {
+    return ec2FleetCache.data;
+  }
+  const instances = await discoverGhInstancesByAsgTag(asgName);
+  // Sort by instanceId for deterministic display name assignment
+  instances.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+  const servers: FleetServer[] = instances.map((inst, idx) => {
+    const fleetId = deriveFleetId(inst.instanceId);
+    return {
+      id: fleetId,
+      name: `GH Worker ${idx + 1}`,
+      host: `/fleet/${fleetId}`,
+      environment: currentEnvironment,
+      region: process.env.AWS_REGION || 'us-east-1',
+      ip: inst.publicIp ?? '',
+      type: process.env.GH_INSTANCE_TYPE || 't3.large',
+      role: 'ghosthands',
+      ec2InstanceId: inst.instanceId,
+    };
+  });
+  ec2FleetCache = { data: servers, expiresAt: Date.now() + EC2_FLEET_CACHE_TTL_MS };
+  return servers;
+}
+
+async function loadFleetConfig(): Promise<FleetServer[]> {
   // Try FLEET_CONFIG env var first (JSON string)
   if (process.env.FLEET_CONFIG) {
     try {
@@ -260,13 +299,27 @@ function loadFleetConfig(): FleetServer[] {
     }
   }
 
-  // Auto-discover GH hosts from Kamal configs
+  // Priority 2: EC2 ASG tag discovery (dynamic, always current)
+  const asgName = process.env.AWS_ASG_NAME;
+  if (asgName) {
+    try {
+      const ec2Hosts = await discoverFleetFromEc2(asgName);
+      if (ec2Hosts.length > 0) {
+        const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
+        fleetServers = [...nonGhEntries, ...ec2Hosts];
+        console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + ${ec2Hosts.length} from EC2 ASG discovery`);
+        return fleetServers;
+      }
+    } catch (err) {
+      console.warn('[atm-api] EC2 fleet discovery failed, falling back to Kamal:', err);
+    }
+  }
+
+  // Priority 3: Kamal auto-discovery (static fallback for non-ASG setups)
   const kamalHosts = discoverFleetFromKamal();
 
   if (kamalHosts.length > 0) {
-    // Keep non-ghosthands entries from fleet.json (ATM self-entry, etc.)
     const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
-    // Apply fleet.json overrides: if fleet.json has a GH entry matching an IP, merge its metadata
     const overridesByIp = new Map(
       jsonServers.filter(s => s.role === 'ghosthands').map(s => [s.ip, s])
     );
@@ -277,7 +330,6 @@ function loadFleetConfig(): FleetServer[] {
     fleetServers = [...nonGhEntries, ...mergedGh];
     console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + ${mergedGh.length} auto-discovered from Kamal`);
   } else if (jsonServers.length > 0) {
-    // Kamal configs missing/empty — fall back to fleet.json entirely
     fleetServers = jsonServers;
     console.log(`[atm-api] Loaded ${fleetServers.length} servers from fleet.json (Kamal fallback)`);
   } else {
@@ -304,8 +356,16 @@ interface DeployFailure {
   failedService?: string;
 }
 
+// Fail fast on secret mismatch in staging
+if (process.env.ATM_DEPLOY_SECRET && process.env.GH_DEPLOY_SECRET
+    && process.env.ATM_DEPLOY_SECRET !== process.env.GH_DEPLOY_SECRET
+    && currentEnvironment === 'staging') {
+  console.error('[atm-api] FATAL: ATM_DEPLOY_SECRET and GH_DEPLOY_SECRET differ in staging.');
+  process.exit(1);
+}
+
 if (!DEPLOY_SECRET) {
-  console.error('[atm-api] FATAL: ATM_DEPLOY_SECRET (or GH_DEPLOY_SECRET) is required');
+  console.error('[atm-api] FATAL: No deploy secret configured (ATM_DEPLOY_SECRET or GH_DEPLOY_SECRET).');
   process.exit(1);
 }
 
@@ -625,7 +685,7 @@ if (typeof Bun !== 'undefined') {
     },
   });
 
-  loadFleetConfig();
+  await loadFleetConfig();
 
   // Start EC2 idle monitor if enabled
   if (EC2_IDLE_ENABLED) {
@@ -642,6 +702,57 @@ if (typeof Bun !== 'undefined') {
       workerPort: WORKER_PORT,
     }).catch(err => console.error('[atm-api] Idle monitor start failed:', err));
     console.log(`[atm-api] EC2 idle monitor enabled (timeout=${EC2_IDLE_TIMEOUT_MS}ms, minRunning=${EC2_MIN_RUNNING})`);
+  }
+
+  // Periodic fleet reconciliation: re-discover from EC2 and sync idle monitor
+  const asgNameForReconcile = process.env.AWS_ASG_NAME;
+  if (asgNameForReconcile) {
+    setInterval(async () => {
+      try {
+        ec2FleetCache = null; // Force fresh discovery
+        await loadFleetConfig();
+
+        const currentWorkerStates = idleMonitor.getWorkerStates();
+        const currentStateMap = new Map(currentWorkerStates.map(w => [w.serverId, w]));
+        const ghFleet = fleetServers.filter(s => s.role === 'ghosthands');
+        const discoveredIds = new Set(ghFleet.map(s => s.id));
+
+        // Additions + Updates
+        for (const server of ghFleet) {
+          const existing = currentStateMap.get(server.id);
+          if (!existing) {
+            console.log(`[atm-api] Fleet reconcile: adding ${server.id} (${server.ec2InstanceId}, ${server.ip})`);
+            idleMonitor.addWorker({
+              id: server.id,
+              ip: server.ip,
+              role: server.role,
+              ec2InstanceId: server.ec2InstanceId,
+            });
+          } else {
+            if (server.ip && server.ip !== existing.ip) {
+              console.log(`[atm-api] Fleet reconcile: ${server.id} IP ${existing.ip} → ${server.ip}`);
+              idleMonitor.updateWorkerEc2(server.id, existing.ec2State, server.ip);
+            }
+            if (server.ec2InstanceId && server.ec2InstanceId !== existing.instanceId) {
+              console.log(`[atm-api] Fleet reconcile: ${server.id} instanceId ${existing.instanceId} → ${server.ec2InstanceId}`);
+              idleMonitor.updateWorkerInstanceId(server.id, server.ec2InstanceId);
+            }
+          }
+        }
+
+        // Removals
+        for (const state of currentWorkerStates) {
+          if (state.ec2State === 'terminated') continue;
+          if (!discoveredIds.has(state.serverId)) {
+            console.log(`[atm-api] Fleet reconcile: ${state.serverId} gone from ASG — marking terminated`);
+            idleMonitor.updateWorkerEc2(state.serverId, 'terminated');
+          }
+        }
+      } catch (err) {
+        console.error('[atm-api] Periodic fleet reconciliation failed:', err);
+      }
+    }, EC2_FLEET_CACHE_TTL_MS * 2); // 60s
+    console.log(`[atm-api] Fleet reconciliation enabled (interval=${EC2_FLEET_CACHE_TTL_MS * 2}ms, asg=${asgNameForReconcile})`);
   }
 
   console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
@@ -666,12 +777,14 @@ async function handleRequest(req: Request): Promise<Response> {
         let workerStatus: Record<string, unknown> | null = null;
 
         if (anyRunning) {
-          // Find a running worker to probe
+          // Find a running worker to probe (dynamic IP from idle monitor, no static env fallback)
           const running = workerStates.find(w => w.ec2State === 'running');
-          const probeIp = running?.ip ?? API_HOST;
-          apiHealth = await fetchJson(`http://${probeIp}:${API_PORT}/health`);
-          workerHealth = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/health`);
-          workerStatus = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/status`);
+          const probeIp = running?.ip ?? null;
+          if (probeIp) {
+            apiHealth = await fetchJson(`http://${probeIp}:${API_PORT}/health`);
+            workerHealth = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/health`);
+            workerStatus = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/status`);
+          }
         }
 
         const activeWorkers = (workerStatus?.active_jobs as number) ?? 0;
@@ -692,7 +805,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /version — Unauthenticated version info ─────────
       if (url.pathname === '/version' && req.method === 'GET') {
-        const apiVersion = await fetchJson(`http://${API_HOST}:${API_PORT}/health/version`);
+        const liveGhWorker = fleetServers.find(s => s.role === 'ghosthands' && s.ip);
+        const apiVersion = liveGhWorker
+          ? await fetchJson(`http://${liveGhWorker.ip}:${API_PORT}/health/version`)
+          : null;
         return Response.json({
           deployServer: 'atm-api',
           version: '1.0.0',
@@ -867,47 +983,10 @@ async function handleRequest(req: Request): Promise<Response> {
           return environmentScoped.filter((s) => !terminatedIds.has(s.id));
         };
 
-        if (fleetServers.length > 0) {
-          return Response.json({
-            servers: applyFleetFilters(fleetServers),
-            filter: {
-              environment: requestedEnvironment,
-              includeTerminated,
-              currentEnvironment,
-            },
-          });
-        }
-
-        // Fallback: build from env vars (legacy single-server mode)
-        const servers: FleetServer[] = [
-          {
-            id: 'atm-gw1',
-            name: 'ATM Server',
-            host: '', // empty = same origin (dashboard is served from ATM)
-            environment: currentEnvironment,
-            region: process.env.AWS_REGION || 'us-east-1',
-            ip: process.env.ATM_IP || '34.195.147.149',
-            type: process.env.ATM_INSTANCE_TYPE || 't3.large',
-            role: 'atm',
-          },
-        ];
-
-        // Add GH worker if configured (GH_API_HOST != localhost means remote)
-        if (API_HOST && API_HOST !== 'localhost' && API_HOST !== '127.0.0.1') {
-          servers.push({
-            id: 'gh-worker-1',
-            name: 'GH Worker 1',
-            host: '/fleet/gh-worker-1', // proxy path — dashboard calls ATM, ATM forwards
-            environment: currentEnvironment,
-            region: process.env.AWS_REGION || 'us-east-1',
-            ip: API_HOST,
-            type: process.env.GH_INSTANCE_TYPE || 't3.large',
-            role: 'ghosthands',
-          });
-        }
-
+        // Fleet is populated by EC2 ASG discovery (Phase 1) or Kamal config (fallback).
+        // Legacy GH_API_HOST env-var fallback removed — no ghost entries from stale env vars.
         return Response.json({
-          servers: applyFleetFilters(servers),
+          servers: applyFleetFilters(fleetServers),
           filter: {
             environment: requestedEnvironment,
             includeTerminated,
@@ -924,7 +1003,7 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 401 },
           );
         }
-        const servers = loadFleetConfig();
+        const servers = await loadFleetConfig();
         return Response.json({ success: true, count: servers.length, servers });
       }
 
@@ -1274,17 +1353,16 @@ async function handleRequest(req: Request): Promise<Response> {
           return handleRequest(new Request(selfUrl.toString(), req));
         }
 
-        // Dynamic lookup from fleet config, with env-var fallback for gh-worker-1
-        const fleetEntry = fleetServers.find(s => s.id === serverId)
-          || (serverId === 'gh-worker-1' ? { ip: API_HOST } : null);
+        // Dynamic lookup from fleet config (no env-var fallback — fleet is EC2-discovered)
+        const fleetEntry = fleetServers.find(s => s.id === serverId);
 
-        if (!fleetEntry || !fleetEntry.ip) {
+        if (!fleetEntry) {
           return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
         }
 
-        // Fast-return for ALL endpoints when worker is stopped/standby (avoids timeout probing unreachable hosts)
+        // Offline fast-return BEFORE IP check — stopped workers have no IP but are known fleet members
         const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
-        if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
+        if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping' || workerState.inStandby)) {
           // Array-shaped endpoints must return [] to match VALET's expected response types
           if (endpoint === '/workers' || endpoint === '/containers') {
             return Response.json([]);
@@ -1292,13 +1370,23 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json({
             status: 'offline',
             ec2State: workerState.ec2State,
+            inStandby: workerState.inStandby,
+            serverId,
             activeWorkers: 0,
             deploySafe: false,
             apiHealthy: false,
             workerStatus: 'unreachable',
             currentDeploy: null,
             uptimeMs: 0,
+            message: `Worker is ${workerState.inStandby ? 'in standby' : workerState.ec2State}. Use POST /fleet/${serverId}/wake to start it.`,
           });
+        }
+
+        if (!fleetEntry.ip) {
+          return Response.json(
+            { error: `Server ${serverId} has no IP (ec2State: ${workerState?.ec2State ?? 'unknown'})` },
+            { status: 503 },
+          );
         }
 
         const serverIp = workerState?.ip ?? fleetEntry.ip;
