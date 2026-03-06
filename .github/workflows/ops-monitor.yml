@@ -1,0 +1,165 @@
+name: CI/CD Monitor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to check"
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - staging
+          - production
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: cicd-monitor-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || 'scheduled' }}
+  cancel-in-progress: false
+
+jobs:
+  monitor-staging:
+    name: Monitor staging
+    if: github.event_name == 'schedule' || github.event.inputs.environment == 'all' || github.event.inputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install atm-api dependencies
+        run: bun install --frozen-lockfile
+        working-directory: atm-api
+
+      - name: Write EC2 SSH key
+        run: |
+          if [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
+            printf '%s' "${{ secrets.EC2_SSH_KEY }}" > "${RUNNER_TEMP}/wekruit-atm-server.pem"
+            chmod 600 "${RUNNER_TEMP}/wekruit-atm-server.pem"
+          fi
+
+      - name: Run monitor
+        id: monitor
+        continue-on-error: true
+        working-directory: atm-api
+        env:
+          GH_TOKEN: ${{ secrets.WORKSPACE_GITHUB_TOKEN || secrets.CROSS_REPO_GITHUB_TOKEN || github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          INFISICAL_SITE_URL: ${{ secrets.INFISICAL_SITE_URL }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          ATM_MONITOR_ATM_API_URL: http://atm-direct.wekruit.com:8080
+          ATM_MONITOR_ATM_INSTANCE_NAME: wekruit-atm-server
+          ATM_MONITOR_EC2_HOST: ${{ secrets.EC2_HOST }}
+          ATM_MONITOR_EC2_KEY_PATH: ${{ runner.temp }}/wekruit-atm-server.pem
+          ATM_MONITOR_EC2_USER: ubuntu
+        run: |
+          bun ../scripts/monitor-cicd.ts \
+            --environment staging \
+            --json-out "${RUNNER_TEMP}/cicd-monitor-staging.json" \
+            --summary-out "${RUNNER_TEMP}/cicd-monitor-staging.md"
+
+      - name: Upload staging monitor artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cicd-monitor-staging
+          path: ${{ runner.temp }}/cicd-monitor-staging.json
+          retention-days: 14
+
+      - name: Upload staging summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cicd-monitor-staging-summary
+          path: ${{ runner.temp }}/cicd-monitor-staging.md
+          retention-days: 14
+
+      - name: Fail on blockers
+        if: steps.monitor.outcome == 'failure'
+        run: exit 1
+
+  monitor-production:
+    name: Monitor production
+    if: github.event_name == 'schedule' || github.event.inputs.environment == 'all' || github.event.inputs.environment == 'production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install atm-api dependencies
+        run: bun install --frozen-lockfile
+        working-directory: atm-api
+
+      - name: Write EC2 SSH key
+        run: |
+          if [ -n "${{ secrets.EC2_SSH_KEY }}" ]; then
+            printf '%s' "${{ secrets.EC2_SSH_KEY }}" > "${RUNNER_TEMP}/wekruit-atm-server.pem"
+            chmod 600 "${RUNNER_TEMP}/wekruit-atm-server.pem"
+          fi
+
+      - name: Run monitor
+        id: monitor
+        continue-on-error: true
+        working-directory: atm-api
+        env:
+          GH_TOKEN: ${{ secrets.WORKSPACE_GITHUB_TOKEN || secrets.CROSS_REPO_GITHUB_TOKEN || github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+          INFISICAL_SITE_URL: ${{ secrets.INFISICAL_SITE_URL }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+          ATM_MONITOR_ATM_API_URL: http://atm-direct.wekruit.com:8080
+          ATM_MONITOR_ATM_INSTANCE_NAME: wekruit-atm-server
+          ATM_MONITOR_EC2_HOST: ${{ secrets.EC2_HOST }}
+          ATM_MONITOR_EC2_KEY_PATH: ${{ runner.temp }}/wekruit-atm-server.pem
+          ATM_MONITOR_EC2_USER: ubuntu
+        run: |
+          bun ../scripts/monitor-cicd.ts \
+            --environment production \
+            --json-out "${RUNNER_TEMP}/cicd-monitor-production.json" \
+            --summary-out "${RUNNER_TEMP}/cicd-monitor-production.md"
+
+      - name: Upload production monitor artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cicd-monitor-production
+          path: ${{ runner.temp }}/cicd-monitor-production.json
+          retention-days: 14
+
+      - name: Upload production summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cicd-monitor-production-summary
+          path: ${{ runner.temp }}/cicd-monitor-production.md
+          retention-days: 14
+
+      - name: Fail on blockers
+        if: steps.monitor.outcome == 'failure'
+        run: exit 1
