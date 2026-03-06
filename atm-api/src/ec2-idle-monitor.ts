@@ -240,6 +240,7 @@ export function updateWorkerInstanceId(serverId: string, instanceId: string): vo
   if (state) state.instanceId = instanceId;
 }
 
+
 // ── Internal ─────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {

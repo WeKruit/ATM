@@ -33,6 +33,7 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
     const secret = sessionStorage.getItem('atm-deploy-secret') || '';
     const authHeaders: HeadersInit = secret ? { 'X-Deploy-Secret': secret } : {};
 
+
     for (const s of servers) {
       fetches.push(
         (async () => {
@@ -223,6 +224,7 @@ function Section({
     </div>
   );
 }
+
 
 interface ServerCardProps {
   server: Server;

@@ -173,6 +173,12 @@ const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '300000'
 const EC2_MIN_RUNNING = parseInt(process.env.EC2_MIN_RUNNING || '0', 10);
 const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000', 10);
 
+// ── EC2 Idle Monitor Config ──────────────────────────────────────────
+const EC2_IDLE_ENABLED = process.env.EC2_IDLE_ENABLED === 'true';
+const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '300000', 10);
+const EC2_MIN_RUNNING = parseInt(process.env.EC2_MIN_RUNNING || '0', 10);
+const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000', 10);
+
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
 
@@ -851,6 +857,7 @@ if (typeof Bun !== 'undefined') {
     console.log(`[atm-api] Fleet reconciliation enabled (interval=${EC2_FLEET_CACHE_TTL_MS * 2}ms, asg=${asgNameForReconcile})`);
   }
 
+
   console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
   console.log(`[atm-api] GH API: ${API_HOST}:${API_PORT}, Worker: ${WORKER_HOST}:${WORKER_PORT}`);
   console.log(`[atm-api] Environment: ${currentEnvironment}, Deploy method: Docker API`);
@@ -1490,6 +1497,7 @@ async function handleRequest(req: Request): Promise<Response> {
           );
         }
 
+
         const serverIp = workerState?.ip ?? fleetEntry.ip;
         const ghApiBase = `http://${serverIp}:${API_PORT}`;
         const ghWorkerBase = `http://${serverIp}:${WORKER_PORT}`;
@@ -1707,6 +1715,7 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json({ error: msg }, { status: 500 });
         }
       }
+
 
       // ── GET /secrets/ghosthands — Fetch all GH secrets for Mac deploy ──
       // Optional query param: ?environment=staging (default: INFISICAL_ENVIRONMENT)

@@ -106,6 +106,7 @@ export async function describeInstancesByIps(ips: string[]): Promise<Ec2Instance
   return instances;
 }
 
+
 /**
  * Discover GH instances by ASG tag (aws:autoscaling:groupName).
  * Returns all instances in the ASG that are not terminated.

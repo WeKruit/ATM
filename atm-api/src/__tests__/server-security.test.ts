@@ -344,6 +344,7 @@ describe('ATM Server Security', () => {
       expect(body.servers.some((s: { id: string }) => s.id === 'gh-prod-1')).toBe(true);
     });
 
+
     test('GET /fleet/:id/workers returns 401 without secret', async () => {
       const res = await fetch(`${baseUrl}/fleet/gh-worker-1/workers`);
       expect(res.status).toBe(401);
