@@ -117,15 +117,6 @@ function AuthWidget() {
 function AppContent() {
   const { servers, setActiveServer } = useFleet();
 
-  // Global deploy secret state
-  const [secret, setSecret] = useState(() => sessionStorage.getItem('atm-deploy-secret') || '');
-  const [showSecretInput, setShowSecretInput] = useState(false);
-
-  const handleSecretChange = (val: string) => {
-    setSecret(val);
-    sessionStorage.setItem('atm-deploy-secret', val);
-  };
-
   // Initialize state from URL params
   const initial = useMemo(() => readUrlState(), []);
   const [activeTab, setActiveTab] = useState<Tab>(initial.tab);

@@ -108,7 +108,6 @@ export default function FleetPage() {
 
   const fetchAll = useCallback(async () => {
     if (!activeServer) return;
-    const secret = sessionStorage.getItem('atm-deploy-secret') || '';
     try {
       const secret = sessionStorage.getItem('atm-deploy-secret') || '';
       const [c, w] = await Promise.all([

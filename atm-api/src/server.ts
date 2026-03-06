@@ -173,12 +173,6 @@ const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '300000'
 const EC2_MIN_RUNNING = parseInt(process.env.EC2_MIN_RUNNING || '0', 10);
 const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000', 10);
 
-// ── EC2 Idle Monitor Config ──────────────────────────────────────────
-const EC2_IDLE_ENABLED = process.env.EC2_IDLE_ENABLED === 'true';
-const EC2_IDLE_TIMEOUT_MS = parseInt(process.env.EC2_IDLE_TIMEOUT_MS || '300000', 10);
-const EC2_MIN_RUNNING = parseInt(process.env.EC2_MIN_RUNNING || '0', 10);
-const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000', 10);
-
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
 
