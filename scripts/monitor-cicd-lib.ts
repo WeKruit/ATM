@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export type MonitorEnvironment = "staging" | "production";
-export type IssueLevel = "ok" | "warning" | "blocker";
+export type IssueLevel = "ok" | "warning" | "blocker" | "skip";
 
 export interface WorkflowRunSummary {
   workflowName?: string;
@@ -97,12 +97,14 @@ export const SECRET_SCOPE_RULES: SecretScopeRule[] = [
 const RUNNING_STATUSES = new Set(["queued", "requested", "waiting", "pending", "in_progress"]);
 const FAILED_CONCLUSIONS = new Set([
   "failure",
-  "cancelled",
   "timed_out",
   "startup_failure",
   "stale",
   "action_required",
 ]);
+
+/** Cancelled runs are non-actionable (superseded by newer pushes). Skip them. */
+const SKIPPABLE_CONCLUSIONS = new Set(["cancelled"]);
 
 export function environmentToBranch(environment: MonitorEnvironment): string {
   return environment === "staging" ? "staging" : "main";
@@ -144,6 +146,15 @@ export function evaluateWorkflowRun(
         level: "ok",
         status: "healthy",
         message: "Latest run completed successfully.",
+        ageMinutes,
+      };
+    }
+
+    if (SKIPPABLE_CONCLUSIONS.has(conclusion)) {
+      return {
+        level: "skip",
+        status: "cancelled",
+        message: `Latest run was cancelled (superseded). Check prior runs for real status.`,
         ageMinutes,
       };
     }

@@ -358,6 +358,50 @@ async function writeSecretsFiles(
   console.log(`[kamal-runner] Wrote secrets files (.kamal/secrets-common + .kamal/secrets.${destination})`);
 }
 
+// ── Host resolver injection (for dynamic fleet IPs) ──────────────────
+
+type HostResolver = () => string[];
+let hostResolverImpl: HostResolver | null = null;
+
+/**
+ * Sets a function that returns the current GH worker IPs.
+ * Called by server.ts to inject the fleet discovery results.
+ */
+export function setHostResolver(resolver: HostResolver): void {
+  hostResolverImpl = resolver;
+}
+
+/**
+ * Writes the Kamal destination config with dynamically discovered hosts.
+ * Prevents committing ephemeral ASG IPs to deploy.staging.yml.
+ */
+async function injectFleetHosts(destination: string): Promise<void> {
+  if (!hostResolverImpl) return;
+
+  const hosts = hostResolverImpl();
+  if (hosts.length === 0) {
+    console.log(`[kamal-runner] No fleet hosts discovered — skipping host injection for ${destination}`);
+    return;
+  }
+
+  const configPath = `config/deploy.${destination}.yml`;
+  try {
+    const raw = await Bun.file(configPath).text();
+
+    // Replace empty hosts arrays with discovered IPs
+    const hostYaml = hosts.map(ip => `      - ${ip}`).join('\n');
+    const updated = raw.replace(
+      /hosts:\s*\[\s*\]/g,
+      `hosts:\n${hostYaml}`,
+    );
+
+    await Bun.write(configPath, updated);
+    console.log(`[kamal-runner] Injected ${hosts.length} fleet host(s) into ${configPath}: ${hosts.join(', ')}`);
+  } catch (err) {
+    console.log(`[kamal-runner] Could not inject hosts into ${configPath}: ${err}`);
+  }
+}
+
 /**
  * Runs a Kamal deploy for the given destination.
  * Fetches secrets from Infisical + ECR, writes them to .kamal/secrets files,
@@ -372,6 +416,9 @@ export async function kamalDeploy(
   version?: string,
   onLine?: (line: string) => void,
 ): Promise<KamalResult> {
+  // Inject dynamically discovered fleet hosts into Kamal destination config
+  await injectFleetHosts(destination);
+
   // Fetch all secrets and write to files + inject as env vars
   const fetcher = secretsFetcherImpl ?? fetchSecretsForKamalDeploy;
   const secretEnv = await fetcher(destination);

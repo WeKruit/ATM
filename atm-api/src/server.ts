@@ -90,7 +90,7 @@ import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
 import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue, fetchSecretsForPath } from './infisical-client';
-import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal } from './kamal-runner';
+import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal, setHostResolver } from './kamal-runner';
 import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
 import * as idleMonitor from './ec2-idle-monitor';
@@ -775,6 +775,13 @@ if (typeof Bun !== 'undefined') {
   });
 
   await loadFleetConfig();
+
+  // Wire fleet discovery into Kamal runner so deploys use live IPs, not stale config
+  setHostResolver(() =>
+    fleetServers
+      .filter(s => s.role === 'ghosthands' && s.ip)
+      .map(s => s.ip),
+  );
 
   // Start EC2 idle monitor if enabled
   if (EC2_IDLE_ENABLED) {

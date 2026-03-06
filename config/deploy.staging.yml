@@ -1,12 +1,12 @@
 # Staging destination for Kamal deploys
-# TEMPORARY — IPs will go stale on next ASG stop/start
+# Hosts are injected dynamically at deploy time by kamal-runner.ts
+# using EC2 fleet discovery (AWS_ASG_NAME) or fleet.json.
+# Do NOT commit ephemeral IPs here — they go stale on ASG recycle.
 servers:
   web:
-    hosts:
-      - 34.200.225.8        # gh-worker-1 (ASG i-0de0d236d543467f0)
+    hosts: []
   workers:
-    hosts:
-      - 34.200.225.8        # gh-worker-1 (ASG i-0de0d236d543467f0)
+    hosts: []
 
 env:
   clear:

@@ -215,12 +215,32 @@ async function collectWorkflowRecords(
       ) || [];
 
     for (const workflow of repoConfig.workflows) {
-      const run = latestRunByWorkflow(runs, workflow);
-      const assessment = evaluateWorkflowRun(
+      // Walk past cancelled/superseded runs to find the latest meaningful result
+      const matchingRuns = runs.filter(
+        (r) => String(r.workflowName || r.name || "") === workflow,
+      );
+      let run = matchingRuns[0] || null;
+      let assessment = evaluateWorkflowRun(
         run as any,
         new Date(),
         DEFAULT_STALE_MINUTES,
       );
+      // If latest run was cancelled, walk back to find a terminal result
+      if (assessment.status === "cancelled" && matchingRuns.length > 1) {
+        for (let i = 1; i < matchingRuns.length; i++) {
+          const priorAssessment = evaluateWorkflowRun(
+            matchingRuns[i] as any,
+            new Date(),
+            DEFAULT_STALE_MINUTES,
+          );
+          if (priorAssessment.status !== "cancelled") {
+            run = matchingRuns[i];
+            assessment = priorAssessment;
+            assessment.message = `(Skipped ${i} cancelled run${i > 1 ? 's' : ''}) ${assessment.message}`;
+            break;
+          }
+        }
+      }
       const record: WorkflowRecord = {
         environment,
         repo: repoConfig.repo,
@@ -234,6 +254,7 @@ async function collectWorkflowRecords(
         updatedAt: run ? String(run.updatedAt || run.startedAt || run.createdAt || '') || null : null,
       };
       records.push(record);
+      if (assessment.level === "skip") continue; // Cancelled runs are non-actionable
       pushIssue(
         assessment.level === "blocker" ? blockers : warnings,
         assessment.level,
