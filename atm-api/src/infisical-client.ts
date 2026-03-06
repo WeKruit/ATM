@@ -20,6 +20,15 @@ interface InfisicalConfig {
   environment: string;
 }
 
+type SecretMap = Record<string, string>;
+
+interface InfisicalAuthSession {
+  accessToken: string;
+  createdAt: number;
+}
+
+let cachedAuthSession: InfisicalAuthSession | null = null;
+
 /**
  * Reads Infisical configuration from environment variables.
  * Returns null if required env vars are not set (Infisical is optional).
@@ -36,6 +45,25 @@ export function getInfisicalConfig(): InfisicalConfig | null {
   }
 
   return { siteUrl, clientId, clientSecret, projectId, environment };
+}
+
+export function normalizeInfisicalEnvironment(environment?: string): string {
+  const value = (environment || '').trim().toLowerCase();
+
+  switch (value) {
+    case '':
+      return 'staging';
+    case 'production':
+    case 'prod':
+      return 'prod';
+    case 'development':
+    case 'develop':
+    case 'dev':
+    case 'local':
+      return 'dev';
+    default:
+      return value;
+  }
 }
 
 // ── SDK abstraction ─────────────────────────────────────────────────
@@ -104,6 +132,163 @@ async function createClient(config: InfisicalConfig): Promise<InfisicalWrapper> 
   throw new Error('@infisical/sdk loaded but neither InfisicalClient nor InfisicalSDK found');
 }
 
+function toSecretMap(secrets: any[]): SecretMap {
+  const result: SecretMap = {};
+
+  for (const secret of secrets) {
+    const key = secret?.secretKey || secret?.key;
+    const value = secret?.secretValue ?? secret?.value;
+    if (key && typeof value === 'string') {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+async function listSecretsForPath(
+  client: InfisicalWrapper,
+  config: InfisicalConfig,
+  secretPath: string,
+  environment: string,
+): Promise<any[]> {
+  const secrets = await client.listSecrets({
+    projectId: config.projectId,
+    environment: normalizeInfisicalEnvironment(environment),
+    secretPath,
+  });
+
+  return Array.isArray(secrets) ? secrets : [];
+}
+
+async function getAccessToken(config: InfisicalConfig): Promise<string> {
+  if (cachedAuthSession && Date.now() - cachedAuthSession.createdAt < 5 * 60_000) {
+    return cachedAuthSession.accessToken;
+  }
+
+  const response = await fetch(`${config.siteUrl}/api/v1/auth/universal-auth/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Infisical auth failed (${response.status}): ${body}`);
+  }
+
+  const payload = (await response.json()) as { accessToken?: string };
+  if (!payload.accessToken) {
+    throw new Error('Infisical auth succeeded without accessToken');
+  }
+
+  cachedAuthSession = {
+    accessToken: payload.accessToken,
+    createdAt: Date.now(),
+  };
+
+  return payload.accessToken;
+}
+
+async function upsertSecretValueRest(
+  config: InfisicalConfig,
+  params: {
+    key: string;
+    value: string;
+    environment: string;
+    secretPath: string;
+  },
+): Promise<'created' | 'updated'> {
+  const accessToken = await getAccessToken(config);
+  const url = `${config.siteUrl}/api/v3/secrets/raw/${encodeURIComponent(params.key)}`;
+  const body = JSON.stringify({
+    workspaceId: config.projectId,
+    environment: normalizeInfisicalEnvironment(params.environment),
+    secretPath: params.secretPath,
+    secretValue: params.value,
+    type: 'shared',
+  });
+
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+  };
+
+  const createResponse = await fetch(url, {
+    method: 'POST',
+    headers,
+    body,
+  });
+
+  if (createResponse.ok) {
+    return 'created';
+  }
+
+  if (createResponse.status === 400 || createResponse.status === 409) {
+    const updateResponse = await fetch(url, {
+      method: 'PATCH',
+      headers,
+      body,
+    });
+
+    if (updateResponse.ok) {
+      return 'updated';
+    }
+
+    const updateBody = await updateResponse.text().catch(() => '');
+    throw new Error(
+      `Infisical update failed for ${params.key} (${updateResponse.status}): ${updateBody}`,
+    );
+  }
+
+  const createBody = await createResponse.text().catch(() => '');
+  throw new Error(`Infisical create failed for ${params.key} (${createResponse.status}): ${createBody}`);
+}
+
+async function deleteSecretValueRest(
+  config: InfisicalConfig,
+  params: {
+    key: string;
+    environment: string;
+    secretPath: string;
+  },
+): Promise<boolean> {
+  const accessToken = await getAccessToken(config);
+  const body = JSON.stringify({
+    workspaceId: config.projectId,
+    environment: normalizeInfisicalEnvironment(params.environment),
+    secretPath: params.secretPath,
+    type: 'shared',
+  });
+  const response = await fetch(
+    `${config.siteUrl}/api/v3/secrets/raw/${encodeURIComponent(params.key)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body,
+    },
+  );
+
+  if (response.ok) {
+    return true;
+  }
+
+  if (response.status === 404) {
+    return false;
+  }
+
+  const errorBody = await response.text().catch(() => '');
+  throw new Error(`Infisical delete failed for ${params.key} (${response.status}): ${errorBody}`);
+}
+
 // ── Public API ──────────────────────────────────────────────────────
 
 /**
@@ -123,27 +308,31 @@ export async function loadSecretsFromInfisical(): Promise<void> {
 
   try {
     const client = await createClient(config);
+    const originalEnvKeys = new Set(Object.keys(process.env));
+    const mergedSecrets: SecretMap = {};
+    const paths = ['/', '/atm'];
 
-    const secrets = await client.listSecrets({
-      projectId: config.projectId,
-      environment: config.environment,
-      secretPath: '/',
-    });
+    for (const secretPath of paths) {
+      const secrets = await listSecretsForPath(
+        client,
+        config,
+        secretPath,
+        config.environment,
+      );
+
+      Object.assign(mergedSecrets, toSecretMap(secrets));
+    }
 
     let loaded = 0;
-    if (Array.isArray(secrets)) {
-      for (const secret of secrets) {
-        const key = secret.secretKey || secret.key;
-        const value = secret.secretValue || secret.value;
-        if (key && typeof value === 'string' && !process.env[key]) {
-          process.env[key] = value;
-          loaded++;
-        }
+    for (const [key, value] of Object.entries(mergedSecrets)) {
+      if (!originalEnvKeys.has(key)) {
+        process.env[key] = value;
+        loaded++;
       }
     }
 
     console.log(
-      `[atm-api] Loaded ${loaded} secrets from Infisical (${config.environment})`,
+      `[atm-api] Loaded ${loaded} secrets from Infisical (${normalizeInfisicalEnvironment(config.environment)}, paths=/,/atm)`,
     );
   } catch (err: any) {
     console.warn(
@@ -166,12 +355,12 @@ export async function listSecretKeys(
 
   try {
     const client = await createClient(config);
-
-    const secrets = await client.listSecrets({
-      projectId: config.projectId,
-      environment: config.environment,
+    const secrets = await listSecretsForPath(
+      client,
+      config,
       secretPath,
-    });
+      config.environment,
+    );
 
     if (!Array.isArray(secrets)) return [];
 
@@ -207,7 +396,7 @@ export async function getSecretValue(
   const secret = await client.getSecret({
     secretName: key,
     projectId: config.projectId,
-    environment: config.environment,
+    environment: normalizeInfisicalEnvironment(config.environment),
     secretPath,
   });
 
@@ -217,6 +406,68 @@ export async function getSecretValue(
   }
 
   return { key, value };
+}
+
+/**
+ * Fetches a whole secret path from Infisical as a key/value object.
+ * Supports ATM/public environment names like "production" and maps them
+ * to Infisical's "prod" environment automatically.
+ */
+export async function fetchSecretsForPath(
+  secretPath = '/',
+  environment?: string,
+): Promise<SecretMap> {
+  const config = getInfisicalConfig();
+  if (!config) {
+    throw new Error('Infisical not configured');
+  }
+
+  const client = await createClient(config);
+  const effectiveEnvironment = environment || config.environment;
+  const secrets = await listSecretsForPath(
+    client,
+    config,
+    secretPath,
+    effectiveEnvironment,
+  );
+
+  return toSecretMap(secrets);
+}
+
+export async function upsertSecretValue(
+  key: string,
+  value: string,
+  secretPath = '/',
+  environment?: string,
+): Promise<'created' | 'updated'> {
+  const config = getInfisicalConfig();
+  if (!config) {
+    throw new Error('Infisical not configured');
+  }
+
+  return upsertSecretValueRest(config, {
+    key,
+    value,
+    secretPath,
+    environment: environment || config.environment,
+  });
+}
+
+export async function deleteSecretValue(
+  key: string,
+  secretPath = '/',
+  environment?: string,
+): Promise<boolean> {
+  const config = getInfisicalConfig();
+  if (!config) {
+    throw new Error('Infisical not configured');
+  }
+
+  return deleteSecretValueRest(config, {
+    key,
+    secretPath,
+    environment: environment || config.environment,
+  });
 }
 
 /** Service paths organized in Infisical */
@@ -251,11 +502,12 @@ export async function getInfisicalStatus(): Promise<{
 
     for (const sp of ['/', ...SECRET_PATHS]) {
       try {
-        const secrets = await client.listSecrets({
-          projectId: config.projectId,
-          environment: config.environment,
-          secretPath: sp,
-        });
+        const secrets = await listSecretsForPath(
+          client,
+          config,
+          sp,
+          config.environment,
+        );
         const count = Array.isArray(secrets) ? secrets.length : 0;
         pathCounts[sp] = count;
         totalCount += count;
@@ -268,7 +520,7 @@ export async function getInfisicalStatus(): Promise<{
     return {
       connected: true,
       projectId: config.projectId,
-      environment: config.environment,
+      environment: normalizeInfisicalEnvironment(config.environment),
       secretCount: totalCount,
       paths: pathCounts,
     };
@@ -276,7 +528,7 @@ export async function getInfisicalStatus(): Promise<{
     return {
       connected: false,
       projectId: config.projectId,
-      environment: config.environment,
+      environment: normalizeInfisicalEnvironment(config.environment),
       error: err.message,
     };
   }

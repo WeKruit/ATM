@@ -197,6 +197,7 @@ export function setSecretsFetcherImpl(fn: SecretsFetcher | null): void {
 
 /** The secrets Kamal deploy.yml declares under env.secret */
 const KAMAL_SECRET_KEYS = [
+  'ATM_DEPLOY_SECRET',
   'GH_ENVIRONMENT',
   'DATABASE_URL',
   'DATABASE_DIRECT_URL',
@@ -222,7 +223,7 @@ const KAMAL_SECRET_KEYS = [
 /**
  * Fetches all secrets needed for a Kamal deploy:
  *  1. KAMAL_REGISTRY_PASSWORD — ECR token via SSH to GH EC2
- *  2. GH app secrets — from Infisical API (/ghosthands path)
+ *  2. GH app secrets — from Infisical API (/ghosthands + /atm paths)
  *
  * Maps destination to Infisical environment: staging→staging, production→prod
  */
@@ -261,7 +262,7 @@ export async function fetchSecretsForKamalDeploy(
   }
 
   const infisicalEnv = destination === 'production' ? 'prod' : 'staging';
-  console.log(`[kamal-runner] Fetching secrets from Infisical (env=${infisicalEnv}, path=/ghosthands)...`);
+  console.log(`[kamal-runner] Fetching secrets from Infisical (env=${infisicalEnv}, paths=/ghosthands,/atm)...`);
 
   try {
     // Authenticate with Universal Auth
@@ -279,27 +280,30 @@ export async function fetchSecretsForKamalDeploy(
     const authData = (await authRes.json()) as { accessToken: string };
     const token = authData.accessToken;
 
-    // Fetch all secrets from /ghosthands path in batch
-    const secretsUrl = new URL(`${infisicalConfig.siteUrl}/api/v3/secrets/raw`);
-    secretsUrl.searchParams.set('workspaceId', infisicalConfig.projectId);
-    secretsUrl.searchParams.set('environment', infisicalEnv);
-    secretsUrl.searchParams.set('secretPath', '/ghosthands');
-
-    const secretsRes = await fetch(secretsUrl.toString(), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!secretsRes.ok) {
-      throw new Error(`Secrets fetch failed: ${secretsRes.status} ${await secretsRes.text()}`);
-    }
-
-    const secretsData = (await secretsRes.json()) as {
-      secrets: Array<{ secretKey: string; secretValue: string }>;
-    };
-
-    // Build env map from fetched secrets
     const secretMap = new Map<string, string>();
-    for (const s of secretsData.secrets || []) {
-      secretMap.set(s.secretKey, s.secretValue);
+
+    for (const secretPath of ['/atm', '/ghosthands']) {
+      const secretsUrl = new URL(`${infisicalConfig.siteUrl}/api/v3/secrets/raw`);
+      secretsUrl.searchParams.set('workspaceId', infisicalConfig.projectId);
+      secretsUrl.searchParams.set('environment', infisicalEnv);
+      secretsUrl.searchParams.set('secretPath', secretPath);
+
+      const secretsRes = await fetch(secretsUrl.toString(), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!secretsRes.ok) {
+        throw new Error(
+          `Secrets fetch failed for ${secretPath}: ${secretsRes.status} ${await secretsRes.text()}`,
+        );
+      }
+
+      const secretsData = (await secretsRes.json()) as {
+        secrets: Array<{ secretKey: string; secretValue: string }>;
+      };
+
+      for (const s of secretsData.secrets || []) {
+        secretMap.set(s.secretKey, s.secretValue);
+      }
     }
 
     // Map required keys

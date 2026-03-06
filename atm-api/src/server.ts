@@ -15,9 +15,15 @@
  *   POST /cleanup              — Runs disk cleanup (Docker prune + tmp + logs) (requires X-Deploy-Secret)
  *   POST /rollback             — Rollback to last successful deploy (requires X-Deploy-Secret)
  *   POST /admin/refresh-secrets — Re-fetch secrets from Infisical/AWS SM (requires X-Deploy-Secret)
+ *   GET  /admin/secrets/apps   — Canonical app/env secret metadata (requires X-Deploy-Secret)
+ *   GET  /admin/secrets/vars   — Canonical secret values for an app/env (requires X-Deploy-Secret)
+ *   PUT  /admin/secrets/vars   — Upsert canonical secret values + fanout (requires X-Deploy-Secret)
+ *   DELETE /admin/secrets/vars — Delete canonical secret values + fanout (requires X-Deploy-Secret)
+ *   POST /admin/secrets/fanout — Re-sync downstream targets from canonical Infisical values (requires X-Deploy-Secret)
  *   GET  /deploys              — List deploy history records (no auth)
  *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
  *   GET  /secrets/ghosthands   — Fetch all GH secrets for Mac deploy (requires X-Deploy-Secret)
+ *   GET  /secrets/parity       — Fingerprint parity report for deploy secrets (requires X-Deploy-Secret)
  *   GET  /secrets/status       — Infisical connection status (no auth)
  *   GET  /deploy/stream        — SSE stream for real-time deploy logs (no auth)
  *   GET  /kamal/validate       — Pre-deploy validation checks (no auth)
@@ -41,7 +47,8 @@
  *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
  * Auth:
- *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
+ *   POST endpoints require X-Deploy-Secret header matching ATM_DEPLOY_SECRET
+ *   (or GH_DEPLOY_SECRET as a temporary fallback).
  *   GET endpoints are unauthenticated except /containers, /workers, /fleet/idle-status,
  *   /fleet/:id/workers, and /fleet/:id/* fallback (all require X-Deploy-Secret).
  *
@@ -51,10 +58,11 @@
  *   take precedence. Both are non-fatal — if unavailable, process.env is used as-is.
  *
  * Usage:
- *   GH_DEPLOY_SECRET=<secret> bun atm-api/src/server.ts
+ *   ATM_DEPLOY_SECRET=<secret> bun atm-api/src/server.ts
  *
  * Environment:
- *   GH_DEPLOY_SECRET     — Required. Shared secret for deploy auth.
+ *   ATM_DEPLOY_SECRET    — Required. Shared secret for deploy auth.
+ *   GH_DEPLOY_SECRET     — Legacy fallback for deploy auth compatibility.
  *   GH_DEPLOY_PORT       — Port to listen on (default: 8080)
  *   GH_API_PORT          — GH API health port (default: 3100)
  *   GH_WORKER_PORT       — GH worker status port (default: 3101)
@@ -89,6 +97,17 @@ import * as idleMonitor from './ec2-idle-monitor';
 import { startInstance, stopInstance, describeInstance, discoverGhInstancesByAsgTag } from './ec2-client';
 import { enterStandby, exitStandby } from './asg-client';
 import path from 'node:path';
+import {
+  resolveDeploySecret,
+  describeSecretFingerprint,
+} from './deploy-secret';
+import {
+  deleteCanonicalSecretVars,
+  fanoutCanonicalSecretVars,
+  getCanonicalSecretApps,
+  listCanonicalSecretVars,
+  upsertCanonicalSecretVars,
+} from './canonical-secrets';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
 
@@ -137,7 +156,6 @@ try {
 await loadSecretsFromAwsSm();
 
 const DEPLOY_PORT = parseInt(process.env.GH_DEPLOY_PORT || '8080', 10);
-const DEPLOY_SECRET = process.env.ATM_DEPLOY_SECRET || process.env.GH_DEPLOY_SECRET;
 const API_HOST = process.env.GH_API_HOST || 'localhost';
 const API_PORT = parseInt(process.env.GH_API_PORT || '3100', 10);
 const WORKER_HOST = process.env.GH_WORKER_HOST || 'localhost';
@@ -147,6 +165,7 @@ const WORKER_PORT = parseInt(process.env.GH_WORKER_PORT || '3101', 10);
 const currentEnvironment: 'staging' | 'production' =
   (process.env.GH_ENVIRONMENT as 'staging' | 'production') ||
   (process.env.NODE_ENV === 'production' ? 'production' : 'staging');
+const deploySecretResolution = resolveDeploySecret(process.env, currentEnvironment);
 
 // ── EC2 Idle Monitor Config ──────────────────────────────────────────
 const EC2_IDLE_ENABLED = process.env.EC2_IDLE_ENABLED === 'true';
@@ -156,6 +175,72 @@ const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000
 
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
+
+function summarizeSecretValue(value?: string | null) {
+  return describeSecretFingerprint(value);
+}
+
+function compareSecretValues(a?: string | null, b?: string | null): boolean | null {
+  if (!a || !b) return null;
+  return a === b;
+}
+
+async function buildDeploySecretParityReport(environment?: string) {
+  const resolvedEnvironment = environment || currentEnvironment;
+  const runtimeAtmSecret = process.env.ATM_DEPLOY_SECRET || null;
+  const runtimeGhSecret = process.env.GH_DEPLOY_SECRET || null;
+  const runtimeResolution = resolveDeploySecret(
+    {
+      ATM_DEPLOY_SECRET: runtimeAtmSecret || undefined,
+      GH_DEPLOY_SECRET: runtimeGhSecret || undefined,
+    },
+    currentEnvironment,
+  );
+
+  const [atmSecrets, ghosthandsSecrets] = await Promise.all([
+    fetchSecretsForPath('/atm', resolvedEnvironment),
+    fetchSecretsForPath('/ghosthands', resolvedEnvironment),
+  ]);
+
+  const infisicalAtmSecret = atmSecrets.ATM_DEPLOY_SECRET || null;
+  const infisicalGhosthandsGhSecret = ghosthandsSecrets.GH_DEPLOY_SECRET || null;
+  const infisicalGhosthandsAtmSecret = ghosthandsSecrets.ATM_DEPLOY_SECRET || null;
+
+  return {
+    runtimeEnvironment: currentEnvironment,
+    requestedEnvironment: resolvedEnvironment,
+    runtime: {
+      resolvedSource: runtimeResolution.source,
+      warning: runtimeResolution.warning || null,
+      ATM_DEPLOY_SECRET: summarizeSecretValue(runtimeAtmSecret),
+      GH_DEPLOY_SECRET: summarizeSecretValue(runtimeGhSecret),
+    },
+    infisical: {
+      '/atm': {
+        ATM_DEPLOY_SECRET: summarizeSecretValue(infisicalAtmSecret),
+      },
+      '/ghosthands': {
+        ATM_DEPLOY_SECRET: summarizeSecretValue(infisicalGhosthandsAtmSecret),
+        GH_DEPLOY_SECRET: summarizeSecretValue(infisicalGhosthandsGhSecret),
+      },
+    },
+    checks: {
+      runtimeSecretsMatch: compareSecretValues(runtimeAtmSecret, runtimeGhSecret),
+      runtimeResolvedMatchesInfisicalAtm: compareSecretValues(
+        runtimeResolution.secret,
+        infisicalAtmSecret,
+      ),
+      infisicalGhosthandsGhMatchesInfisicalAtm: compareSecretValues(
+        infisicalGhosthandsGhSecret,
+        infisicalAtmSecret,
+      ),
+      infisicalGhosthandsAtmMatchesInfisicalAtm: compareSecretValues(
+        infisicalGhosthandsAtmSecret,
+        infisicalAtmSecret,
+      ),
+    },
+  };
+}
 
 // ── Fleet Config ────────────────────────────────────────────────────
 
@@ -363,26 +448,23 @@ interface DeployFailure {
   failedService?: string;
 }
 
-// Fail fast on secret mismatch in staging
-if (process.env.ATM_DEPLOY_SECRET && process.env.GH_DEPLOY_SECRET
-    && process.env.ATM_DEPLOY_SECRET !== process.env.GH_DEPLOY_SECRET
-    && currentEnvironment === 'staging') {
-  console.error('[atm-api] FATAL: ATM_DEPLOY_SECRET and GH_DEPLOY_SECRET differ in staging.');
-  process.exit(1);
+if (deploySecretResolution.warning) {
+  console.warn(`[atm-api] ${deploySecretResolution.warning}`);
 }
 
-if (!DEPLOY_SECRET) {
-  console.error('[atm-api] FATAL: No deploy secret configured (ATM_DEPLOY_SECRET or GH_DEPLOY_SECRET).');
+if (deploySecretResolution.error || !deploySecretResolution.secret) {
+  console.error(`[atm-api] FATAL: ${deploySecretResolution.error || 'No deploy secret configured.'}`);
   process.exit(1);
 }
 
 function verifySecret(req: Request): boolean {
   const header = req.headers.get('x-deploy-secret');
-  if (!header || !DEPLOY_SECRET) return false;
+  const resolved = resolveDeploySecret(process.env, currentEnvironment);
+  if (!header || !resolved.secret) return false;
   try {
     return crypto.timingSafeEqual(
       Buffer.from(header),
-      Buffer.from(DEPLOY_SECRET),
+      Buffer.from(resolved.secret),
     );
   } catch {
     return false;
@@ -1599,6 +1681,26 @@ async function handleRequest(req: Request): Promise<Response> {
         return Response.json(keys);
       }
 
+      // ── GET /secrets/parity — Compare masked deploy-secret fingerprints ──
+      if (url.pathname === '/secrets/parity' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        const environment = url.searchParams.get('environment') || undefined;
+
+        try {
+          const report = await buildDeploySecretParityReport(environment);
+          return Response.json(report);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 500 });
+        }
+      }
+
       // ── GET /secrets/ghosthands — Fetch all GH secrets for Mac deploy ──
       // Optional query param: ?environment=staging (default: INFISICAL_ENVIRONMENT)
       // Filters out EC2-specific keys not needed on Mac
@@ -1932,6 +2034,131 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json(rollbackResult);
         } else {
           return Response.json(rollbackResult, { status: 400 });
+        }
+      }
+
+      // ── GET /admin/secrets/apps — Canonical app/env secret metadata ──
+      if (url.pathname === '/admin/secrets/apps' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        return Response.json({
+          apps: getCanonicalSecretApps(),
+        });
+      }
+
+      // ── GET /admin/secrets/vars — Canonical secret values for app/env ──
+      if (url.pathname === '/admin/secrets/vars' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        const app = url.searchParams.get('app') || '';
+        const environment = url.searchParams.get('environment') || '';
+
+        try {
+          const payload = await listCanonicalSecretVars(app, environment);
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
+        }
+      }
+
+      // ── PUT /admin/secrets/vars — Canonical upsert + fanout ────────
+      if (url.pathname === '/admin/secrets/vars' && req.method === 'PUT') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        try {
+          const body = (await req.json()) as {
+            app?: string;
+            environment?: string;
+            vars?: Array<{ key: string; value: string }>;
+            fanout?: 'auto' | string[];
+          };
+
+          const targets = Array.isArray(body.fanout) ? body.fanout as any : undefined;
+          const payload = await upsertCanonicalSecretVars(
+            body.app || '',
+            body.environment || '',
+            body.vars || [],
+            targets,
+          );
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
+        }
+      }
+
+      // ── DELETE /admin/secrets/vars — Canonical delete + fanout ──────
+      if (url.pathname === '/admin/secrets/vars' && req.method === 'DELETE') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        try {
+          const body = (await req.json()) as {
+            app?: string;
+            environment?: string;
+            keys?: string[];
+            fanout?: 'auto' | string[];
+          };
+
+          const targets = Array.isArray(body.fanout) ? body.fanout as any : undefined;
+          const payload = await deleteCanonicalSecretVars(
+            body.app || '',
+            body.environment || '',
+            body.keys || [],
+            targets,
+          );
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
+        }
+      }
+
+      // ── POST /admin/secrets/fanout — Re-sync downstream targets ─────
+      if (url.pathname === '/admin/secrets/fanout' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        try {
+          const body = (await req.json()) as {
+            app?: string;
+            environment?: string;
+            targets?: string[];
+          };
+
+          const payload = await fanoutCanonicalSecretVars(
+            body.app || '',
+            body.environment || '',
+            Array.isArray(body.targets) ? body.targets as any : undefined,
+          );
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
         }
       }
 

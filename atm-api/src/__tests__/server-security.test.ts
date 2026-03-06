@@ -1,5 +1,4 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import type { Server } from 'bun';
 
 // We test by starting a minimal server that mimics the CORS/auth logic.
 // This avoids importing the full server.ts which has side effects (Docker, EC2, etc.)
@@ -50,118 +49,125 @@ function withCors(response: Response, req: Request, allowedOrigins: Set<string>)
   return response;
 }
 
+const baseUrl = 'http://atm-test.local';
+const originalFetch = globalThis.fetch;
+
+async function handleTestRequest(req: Request, allowedOrigins: Set<string>): Promise<Response> {
+  const url = new URL(req.url);
+
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: getCorsHeaders(req, allowedOrigins) });
+  }
+
+  // /health — no auth
+  if (url.pathname === '/health' && req.method === 'GET') {
+    return withCors(Response.json({ status: 'ok' }), req, allowedOrigins);
+  }
+
+  // /metrics — no auth
+  if (url.pathname === '/metrics' && req.method === 'GET') {
+    return withCors(Response.json({ cpu: 0.1 }), req, allowedOrigins);
+  }
+
+  // /containers — requires auth
+  if (url.pathname === '/containers' && req.method === 'GET') {
+    if (!verifySecret(req)) {
+      return withCors(
+        Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
+        req, allowedOrigins,
+      );
+    }
+    return withCors(Response.json([{ id: 'abc123', name: 'test' }]), req, allowedOrigins);
+  }
+
+  // /workers — requires auth
+  if (url.pathname === '/workers' && req.method === 'GET') {
+    if (!verifySecret(req)) {
+      return withCors(
+        Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
+        req, allowedOrigins,
+      );
+    }
+    return withCors(Response.json([{ workerId: 'w1' }]), req, allowedOrigins);
+  }
+
+  // /fleet/idle-status — requires auth (exposes IPs + instance IDs)
+  if (url.pathname === '/fleet/idle-status' && req.method === 'GET') {
+    if (!verifySecret(req)) {
+      return withCors(
+        Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
+        req, allowedOrigins,
+      );
+    }
+    return withCors(Response.json({ enabled: true, workers: [] }), req, allowedOrigins);
+  }
+
+  // /fleet — supports environment filter + includeTerminated toggle
+  if (url.pathname === '/fleet' && req.method === 'GET') {
+    const env = url.searchParams.get('environment') || 'staging';
+    const includeTerminated = url.searchParams.get('includeTerminated') === 'true';
+    const allServers = [
+      { id: 'atm-gw1', role: 'atm', environment: 'staging' },
+      { id: 'gh-stg-1', role: 'ghosthands', environment: 'staging', ec2State: 'running' },
+      { id: 'gh-prod-1', role: 'ghosthands', environment: 'production', ec2State: 'terminated' },
+    ];
+    const envScoped = env === 'all' ? allServers : allServers.filter((s) => s.environment === env || s.role === 'atm');
+    const servers = includeTerminated
+      ? envScoped
+      : envScoped.filter((s) => s.ec2State !== 'terminated');
+    return withCors(
+      Response.json({
+        servers,
+        filter: { environment: env, includeTerminated, currentEnvironment: 'staging' },
+      }),
+      req,
+      allowedOrigins,
+    );
+  }
+
+  // /fleet/:id/workers — requires auth (proxied worker metadata)
+  if (url.pathname.startsWith('/fleet/') && req.method === 'GET') {
+    const rest = url.pathname.slice('/fleet/'.length);
+    const slashIdx = rest.indexOf('/');
+    if (slashIdx !== -1) {
+      const endpoint = rest.slice(slashIdx);
+      if (endpoint === '/workers') {
+        if (!verifySecret(req)) {
+          return withCors(
+            Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
+            req, allowedOrigins,
+          );
+        }
+        return withCors(Response.json([{ workerId: 'w1' }]), req, allowedOrigins);
+      }
+      if (endpoint === '/health') {
+        return withCors(Response.json({ status: 'healthy' }), req, allowedOrigins);
+      }
+    }
+  }
+
+  return withCors(Response.json({ error: 'Not found' }, { status: 404 }), req, allowedOrigins);
+}
+
 describe('ATM Server Security', () => {
-  let server: Server;
-  let baseUrl: string;
   const allowedOrigins = buildAllowedOrigins();
 
   beforeAll(() => {
-    server = Bun.serve({
-      hostname: '127.0.0.1',
-      port: 0, // random available port
-      async fetch(req) {
-        const url = new URL(req.url);
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request
+        ? input
+        : new Request(typeof input === 'string' || input instanceof URL ? input.toString() : String(input), init);
 
-        if (req.method === 'OPTIONS') {
-          return new Response(null, { status: 204, headers: getCorsHeaders(req, allowedOrigins) });
-        }
+      if (request.url.startsWith(baseUrl)) {
+        return handleTestRequest(request, allowedOrigins);
+      }
 
-        // /health — no auth
-        if (url.pathname === '/health' && req.method === 'GET') {
-          return withCors(Response.json({ status: 'ok' }), req, allowedOrigins);
-        }
-
-        // /metrics — no auth
-        if (url.pathname === '/metrics' && req.method === 'GET') {
-          return withCors(Response.json({ cpu: 0.1 }), req, allowedOrigins);
-        }
-
-        // /containers — requires auth
-        if (url.pathname === '/containers' && req.method === 'GET') {
-          if (!verifySecret(req)) {
-            return withCors(
-              Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
-              req, allowedOrigins,
-            );
-          }
-          return withCors(Response.json([{ id: 'abc123', name: 'test' }]), req, allowedOrigins);
-        }
-
-        // /workers — requires auth
-        if (url.pathname === '/workers' && req.method === 'GET') {
-          if (!verifySecret(req)) {
-            return withCors(
-              Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
-              req, allowedOrigins,
-            );
-          }
-          return withCors(Response.json([{ workerId: 'w1' }]), req, allowedOrigins);
-        }
-
-        // /fleet/idle-status — requires auth (exposes IPs + instance IDs)
-        if (url.pathname === '/fleet/idle-status' && req.method === 'GET') {
-          if (!verifySecret(req)) {
-            return withCors(
-              Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
-              req, allowedOrigins,
-            );
-          }
-          return withCors(Response.json({ enabled: true, workers: [] }), req, allowedOrigins);
-        }
-
-        // /fleet — supports environment filter + includeTerminated toggle
-        if (url.pathname === '/fleet' && req.method === 'GET') {
-          const env = url.searchParams.get('environment') || 'staging';
-          const includeTerminated = url.searchParams.get('includeTerminated') === 'true';
-          const allServers = [
-            { id: 'atm-gw1', role: 'atm', environment: 'staging' },
-            { id: 'gh-stg-1', role: 'ghosthands', environment: 'staging', ec2State: 'running' },
-            { id: 'gh-prod-1', role: 'ghosthands', environment: 'production', ec2State: 'terminated' },
-          ];
-          const envScoped = env === 'all' ? allServers : allServers.filter((s) => s.environment === env || s.role === 'atm');
-          const servers = includeTerminated
-            ? envScoped
-            : envScoped.filter((s) => s.ec2State !== 'terminated');
-          return withCors(
-            Response.json({
-              servers,
-              filter: { environment: env, includeTerminated, currentEnvironment: 'staging' },
-            }),
-            req,
-            allowedOrigins,
-          );
-        }
-
-        // /fleet/:id/workers — requires auth (proxied worker metadata)
-        if (url.pathname.startsWith('/fleet/') && req.method === 'GET') {
-          const rest = url.pathname.slice('/fleet/'.length);
-          const slashIdx = rest.indexOf('/');
-          if (slashIdx !== -1) {
-            const endpoint = rest.slice(slashIdx);
-            if (endpoint === '/workers') {
-              if (!verifySecret(req)) {
-                return withCors(
-                  Response.json({ success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' }, { status: 401 }),
-                  req, allowedOrigins,
-                );
-              }
-              return withCors(Response.json([{ workerId: 'w1' }]), req, allowedOrigins);
-            }
-            // /fleet/:id/health — no auth (public health check)
-            if (endpoint === '/health') {
-              return withCors(Response.json({ status: 'healthy' }), req, allowedOrigins);
-            }
-          }
-        }
-
-        return withCors(Response.json({ error: 'Not found' }, { status: 404 }), req, allowedOrigins);
-      },
-    });
-    baseUrl = `http://127.0.0.1:${server.port}`;
+      return originalFetch(input, init);
+    }) as typeof fetch;
   });
 
   afterAll(() => {
-    server.stop(true);
+    globalThis.fetch = originalFetch;
   });
 
   // ── CORS Tests ──────────────────────────────────────────────────

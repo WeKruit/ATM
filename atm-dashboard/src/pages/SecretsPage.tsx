@@ -1,24 +1,62 @@
 import type React from 'react';
 import { useEffect, useState, useCallback } from 'react';
-import { get, getWithAuth } from '../api';
-import type { SecretsStatus, SecretKey, SecretEntry } from '../api';
+import {
+  deleteWithAuth,
+  get,
+  getWithAuth,
+  post,
+  putWithAuth,
+  type SecretAdminVarsResponse,
+  type SecretApp,
+  type SecretAppMetadata,
+  type SecretEnvironment,
+  type SecretFanoutResponse,
+  type SecretMutationResponse,
+  type SecretsStatus,
+} from '../api';
 import StatusBadge from '../components/StatusBadge';
-const SECRET_PATHS = ['/', '/valet', '/ghosthands', '/atm'] as const;
+
 const INFISICAL_URL = 'https://infisical-wekruit.fly.dev';
+const ENVIRONMENTS: SecretEnvironment[] = ['dev', 'staging', 'production'];
+const APP_FALLBACKS: SecretApp[] = ['atm', 'valet', 'ghosthands'];
+
+interface MutationState {
+  title: string;
+  response: SecretMutationResponse | SecretFanoutResponse;
+}
+
+function mutationResults(response: SecretMutationResponse | SecretFanoutResponse) {
+  return 'results' in response ? response.results : response.fanout.results;
+}
+
+function mutationSuccess(response: SecretMutationResponse | SecretFanoutResponse) {
+  return 'results' in response ? response.success : response.fanout.success;
+}
 
 export default function SecretsPage() {
-  // Secrets are global (managed by ATM), always fetch from same origin
   const base = '';
 
   const [status, setStatus] = useState<SecretsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [secret, setSecret] = useState(() => sessionStorage.getItem('atm-deploy-secret') || '');
-  const [keys, setKeys] = useState<SecretKey[]>([]);
-  const [keysLoading, setKeysLoading] = useState(false);
-  const [revealed, setRevealed] = useState<Record<string, string>>({});
+
+  const [apps, setApps] = useState<SecretAppMetadata[]>([]);
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [selectedApp, setSelectedApp] = useState<SecretApp>('atm');
+  const [selectedEnvironment, setSelectedEnvironment] = useState<SecretEnvironment>('staging');
+
+  const [varsResponse, setVarsResponse] = useState<SecretAdminVarsResponse | null>(null);
+  const [varsLoading, setVarsLoading] = useState(false);
+  const [revealedKeys, setRevealedKeys] = useState<Record<string, boolean>>({});
   const [copied, setCopied] = useState<string | null>(null);
-  const [selectedPath, setSelectedPath] = useState<string>('/');
+
+  const [draftKey, setDraftKey] = useState('');
+  const [draftValue, setDraftValue] = useState('');
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [fanoutBusy, setFanoutBusy] = useState(false);
+  const [mutationState, setMutationState] = useState<MutationState | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -38,55 +76,182 @@ export default function SecretsPage() {
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  const handleSecretChange = (val: string) => {
-    setSecret(val);
-    sessionStorage.setItem('atm-deploy-secret', val);
+  const handleSecretChange = (value: string) => {
+    setSecret(value);
+    sessionStorage.setItem('atm-deploy-secret', value);
   };
 
-  const loadKeys = async () => {
+  const loadApps = useCallback(async () => {
     if (!secret) return;
-    setKeysLoading(true);
+    setAppsLoading(true);
     try {
-      const pathParam = selectedPath !== '/' ? `?path=${encodeURIComponent(selectedPath)}` : '';
-      const data = await getWithAuth<SecretKey[]>(`/secrets/list${pathParam}`, secret, base);
-      setKeys(data);
-      setRevealed({});
+      const data = await getWithAuth<{ apps: SecretAppMetadata[] }>('/admin/secrets/apps', secret, base);
+      setApps(data.apps);
+      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load secrets');
+      setError(err instanceof Error ? err.message : 'Failed to load apps');
     } finally {
-      setKeysLoading(false);
+      setAppsLoading(false);
     }
-  };
+  }, [secret, base]);
 
-  // Reload secrets when path changes (if already authenticated)
-  useEffect(() => {
-    if (secret && keys.length > 0) {
-      loadKeys();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPath]);
-
-  const revealSecret = async (key: string) => {
+  const loadVars = useCallback(async () => {
     if (!secret) return;
+    setVarsLoading(true);
     try {
-      const pathParam = selectedPath !== '/' ? `?path=${encodeURIComponent(selectedPath)}` : '';
-      const data = await getWithAuth<SecretEntry>(`/secrets/${encodeURIComponent(key)}${pathParam}`, secret, base);
-      setRevealed((prev) => ({ ...prev, [key]: data.value }));
+      const params = new URLSearchParams({
+        app: selectedApp,
+        environment: selectedEnvironment,
+      });
+      const data = await getWithAuth<SecretAdminVarsResponse>(
+        `/admin/secrets/vars?${params.toString()}`,
+        secret,
+        base,
+      );
+      setVarsResponse(data);
+      setRevealedKeys({});
+      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Failed to reveal ${key}`);
+      setError(err instanceof Error ? err.message : 'Failed to load secret vars');
+    } finally {
+      setVarsLoading(false);
     }
+  }, [secret, selectedApp, selectedEnvironment, base]);
+
+  useEffect(() => {
+    if (!secret) return;
+    loadApps();
+  }, [secret, loadApps]);
+
+  useEffect(() => {
+    if (!secret) return;
+    loadVars();
+  }, [secret, selectedApp, selectedEnvironment, loadVars]);
+
+  useEffect(() => {
+    if (apps.length === 0) return;
+    if (!apps.some((app) => app.app === selectedApp)) {
+      setSelectedApp(apps[0]?.app || 'atm');
+    }
+  }, [apps, selectedApp]);
+
+  const toggleReveal = (key: string) => {
+    setRevealedKeys((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   const copyToClipboard = async (key: string, value: string) => {
     await navigator.clipboard.writeText(value);
     setCopied(key);
-    setTimeout(() => setCopied(null), 2000);
+    setTimeout(() => setCopied(null), 1500);
   };
+
+  const resetDraft = () => {
+    setDraftKey('');
+    setDraftValue('');
+    setEditingKey(null);
+  };
+
+  const startEdit = (key: string, value: string) => {
+    setEditingKey(key);
+    setDraftKey(key);
+    setDraftValue(value);
+  };
+
+  const saveSecret = async () => {
+    if (!secret || !draftKey.trim()) return;
+    setSaving(true);
+    try {
+      const response = await putWithAuth<SecretMutationResponse>(
+        '/admin/secrets/vars',
+        {
+          app: selectedApp,
+          environment: selectedEnvironment,
+          vars: [{ key: draftKey.trim(), value: draftValue }],
+        },
+        secret,
+        base,
+      );
+      setMutationState({
+        title: editingKey ? `Updated ${draftKey.trim()}` : `Added ${draftKey.trim()}`,
+        response,
+      });
+      resetDraft();
+      await loadVars();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save secret');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteSecret = async (key: string) => {
+    if (!secret) return;
+    if (!confirm(`Delete ${key} from ${selectedApp}/${selectedEnvironment}?`)) return;
+    setSaving(true);
+    try {
+      const response = await deleteWithAuth<SecretMutationResponse>(
+        '/admin/secrets/vars',
+        {
+          app: selectedApp,
+          environment: selectedEnvironment,
+          keys: [key],
+        },
+        secret,
+        base,
+      );
+      setMutationState({
+        title: `Deleted ${key}`,
+        response,
+      });
+      await loadVars();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete secret');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fanoutSecrets = async () => {
+    if (!secret) return;
+    setFanoutBusy(true);
+    try {
+      const response = await post<SecretFanoutResponse>(
+        '/admin/secrets/fanout',
+        {
+          app: selectedApp,
+          environment: selectedEnvironment,
+        },
+        secret,
+        base,
+      );
+      setMutationState({
+        title: `Re-synced ${selectedApp}/${selectedEnvironment}`,
+        response,
+      });
+      await loadVars();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fan out secrets');
+    } finally {
+      setFanoutBusy(false);
+    }
+  };
+
+  const selectedMetadata =
+    apps.find((app) => app.app === selectedApp) ||
+    apps[0] ||
+    ({
+      app: selectedApp,
+      description: '',
+      path: `/${selectedApp}`,
+      environments: ENVIRONMENTS,
+      defaultTargets: [],
+      supportedTargets: [],
+    } satisfies SecretAppMetadata);
 
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20 text-gray-500">
-        <svg className="h-5 w-5 animate-spin mr-3" viewBox="0 0 24 24" fill="none">
+        <svg className="mr-3 h-5 w-5 animate-spin" viewBox="0 0 24 24" fill="none">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
         </svg>
@@ -97,24 +262,28 @@ export default function SecretsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gray-100">Secrets Management</h1>
+        <div>
+          <h1 className="text-lg font-semibold text-gray-100">Secrets Control Plane</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Add a key once for an app + environment. ATM writes Infisical first, then fans out downstream targets.
+          </p>
+        </div>
         <div className="flex items-center gap-3">
           <a
             href={INFISICAL_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-blue-400 border border-gray-700 hover:bg-gray-700 hover:text-blue-300 transition-colors flex items-center gap-1.5"
+            className="flex items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm font-medium text-blue-400 transition-colors hover:bg-gray-700 hover:text-blue-300"
           >
-            Manage in Infisical
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            Open Infisical
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
             </svg>
           </a>
           <button
             onClick={fetchStatus}
-            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 text-gray-400 border border-gray-700 hover:bg-gray-700 transition-colors"
+            className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm font-medium text-gray-400 transition-colors hover:bg-gray-700"
           >
             Refresh
           </button>
@@ -127,198 +296,326 @@ export default function SecretsPage() {
         </div>
       )}
 
-      {/* Auth + Path Filter Section */}
       <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
-        <h2 className="text-sm font-semibold text-gray-300 mb-3">Authentication</h2>
-        <div className="flex items-center gap-3">
+        <h2 className="mb-3 text-sm font-semibold text-gray-300">Authentication</h2>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
           <input
             type="password"
             value={secret}
             onChange={(e) => handleSecretChange(e.target.value)}
             placeholder="Deploy secret (X-Deploy-Secret)"
-            className="flex-1 bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600"
+            className="flex-1 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-300 placeholder:text-gray-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
           />
-          <select
-            value={selectedPath}
-            onChange={(e) => setSelectedPath(e.target.value)}
-            className="bg-gray-800 border border-gray-700 text-gray-300 text-sm rounded-lg px-3 py-2 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-          >
-            {SECRET_PATHS.map((p) => (
-              <option key={p} value={p}>
-                {p === '/' ? 'Root (/)' : p}
-              </option>
-            ))}
-          </select>
           <button
-            onClick={loadKeys}
-            disabled={!secret || keysLoading}
-            className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-              !secret || keysLoading
-                ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+            onClick={loadApps}
+            disabled={!secret || appsLoading}
+            className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+              !secret || appsLoading
+                ? 'cursor-not-allowed bg-gray-800 text-gray-600'
                 : 'bg-blue-600 text-white hover:bg-blue-500'
             }`}
           >
-            {keysLoading ? 'Loading...' : 'Load Secrets'}
+            {appsLoading ? 'Loading…' : 'Load Control Plane'}
           </button>
         </div>
       </div>
 
-      {/* Secrets Table */}
-      {keys.length > 0 && (
-        <div className="rounded-lg border border-gray-800 overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-800 bg-gray-900/80 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-300">
-              {keys.length} Secret{keys.length !== 1 ? 's' : ''}{' '}
-              <span className="text-gray-500 font-normal">in {selectedPath === '/' ? 'root' : selectedPath}</span>
-            </h2>
+      <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+        <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
+          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-300">Canonical Secrets</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                Source of truth lives in {selectedMetadata.path} for {selectedEnvironment}.
+              </p>
+            </div>
+            <button
+              onClick={fanoutSecrets}
+              disabled={!secret || fanoutBusy}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                !secret || fanoutBusy
+                  ? 'cursor-not-allowed bg-gray-800 text-gray-600'
+                  : 'bg-emerald-600 text-white hover:bg-emerald-500'
+              }`}
+            >
+              {fanoutBusy ? 'Syncing…' : 'Fan Out Now'}
+            </button>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-800 bg-gray-900/80">
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">Key</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">Value</th>
-                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-400">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800/60">
-                {keys.map((k) => (
-                  <tr key={k.key} className="hover:bg-gray-800/30">
-                    <td className="px-4 py-3 font-mono text-xs text-gray-200">{k.key}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-gray-400 max-w-[300px]">
-                      {revealed[k.key] !== undefined ? (
-                        <span className="text-green-400 break-all">{revealed[k.key]}</span>
-                      ) : (
-                        <span className="text-gray-600">********</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        {revealed[k.key] === undefined ? (
-                          <button
-                            onClick={() => revealSecret(k.key)}
-                            className="px-2 py-1 text-xs font-medium rounded bg-gray-800 text-gray-400 border border-gray-700 hover:bg-gray-700 transition-colors"
-                          >
-                            Reveal
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => copyToClipboard(k.key, revealed[k.key])}
-                            className={`px-2 py-1 text-xs font-medium rounded border transition-colors ${
-                              copied === k.key
-                                ? 'bg-green-500/20 text-green-400 border-green-500/30'
-                                : 'bg-gray-800 text-gray-400 border-gray-700 hover:bg-gray-700'
-                            }`}
-                          >
-                            {copied === k.key ? 'Copied!' : 'Copy'}
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+
+          <div className="mb-4 grid gap-3 md:grid-cols-3">
+            <select
+              value={selectedApp}
+              onChange={(e) => setSelectedApp(e.target.value as SecretApp)}
+              className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            >
+              {(apps.length > 0 ? apps : APP_FALLBACKS.map((app) => ({ app } as SecretAppMetadata))).map((app) => (
+                <option key={app.app} value={app.app}>
+                  {app.app}
+                </option>
+              ))}
+            </select>
+            <select
+              value={selectedEnvironment}
+              onChange={(e) => setSelectedEnvironment(e.target.value as SecretEnvironment)}
+              className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            >
+              {ENVIRONMENTS.map((environment) => (
+                <option key={environment} value={environment}>
+                  {environment}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={loadVars}
+              disabled={!secret || varsLoading}
+              className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                !secret || varsLoading
+                  ? 'cursor-not-allowed bg-gray-800 text-gray-600'
+                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+              }`}
+            >
+              {varsLoading ? 'Loading…' : 'Reload Vars'}
+            </button>
+          </div>
+
+          <div className="mb-4 rounded-lg border border-gray-800 bg-gray-950/80 p-4">
+            <div className="grid gap-3 md:grid-cols-3">
+              <InfoItem label="Infisical Path" value={selectedMetadata.path} mono />
+              <InfoItem label="App" value={selectedMetadata.app} />
+              <InfoItem label="Downstream Targets" value={String(selectedMetadata.defaultTargets.length)} />
+            </div>
+            <p className="mt-3 text-xs text-gray-500">{selectedMetadata.description}</p>
+            {selectedMetadata.defaultTargets.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {selectedMetadata.defaultTargets.map((target) => (
+                  <span
+                    key={target}
+                    className="rounded-full border border-gray-700 bg-gray-900 px-2.5 py-1 font-mono text-[11px] text-gray-400"
+                  >
+                    {target}
+                  </span>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Connection Status */}
-      <div className="rounded-lg border border-gray-800 bg-gray-900/50 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-300">Infisical Connection</h2>
-          <StatusBadge status={status?.connected ? 'connected' : 'disconnected'} size="md" />
-        </div>
-
-        <div className="p-6">
-          {status?.connected ? (
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <InfoItem label="Project ID" value={status.projectId || '-'} mono />
-                <InfoItem label="Environment" value={status.environment || '-'} />
-                <InfoItem
-                  label="Total Secrets"
-                  value={
-                    <span className="text-2xl font-bold tabular-nums text-green-400">
-                      {status.secretCount ?? 0}
-                    </span>
-                  }
-                />
               </div>
+            )}
+          </div>
 
-              {/* Per-path secret counts */}
-              {status.paths && Object.keys(status.paths).length > 0 && (
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {Object.entries(status.paths).map(([p, count]) => (
-                    <div key={p} className="rounded-lg border border-gray-800 bg-gray-900/80 px-3 py-2">
-                      <span className="text-gray-500 text-xs font-mono">{p}</span>
-                      <p className="text-lg font-bold tabular-nums text-gray-200 mt-0.5">{count}</p>
+          <div className="mb-4 rounded-lg border border-gray-800 bg-gray-950/80 p-4">
+            <h3 className="mb-3 text-sm font-semibold text-gray-300">
+              {editingKey ? `Edit ${editingKey}` : 'Add or Update a Key'}
+            </h3>
+            <div className="grid gap-3 md:grid-cols-[1fr_2fr_auto]">
+              <input
+                value={draftKey}
+                onChange={(e) => setDraftKey(e.target.value.toUpperCase())}
+                placeholder="KEY_NAME"
+                className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-300 placeholder:text-gray-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+              <textarea
+                value={draftValue}
+                onChange={(e) => setDraftValue(e.target.value)}
+                placeholder="Secret value"
+                rows={2}
+                className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-300 placeholder:text-gray-600 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+              <div className="flex items-start gap-2">
+                <button
+                  onClick={saveSecret}
+                  disabled={!secret || !draftKey.trim() || saving}
+                  className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                    !secret || !draftKey.trim() || saving
+                      ? 'cursor-not-allowed bg-gray-800 text-gray-600'
+                      : 'bg-blue-600 text-white hover:bg-blue-500'
+                  }`}
+                >
+                  {saving ? 'Saving…' : editingKey ? 'Update' : 'Save'}
+                </button>
+                {(editingKey || draftKey || draftValue) && (
+                  <button
+                    onClick={resetDraft}
+                    className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-sm font-medium text-gray-300 hover:bg-gray-700"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {varsLoading ? (
+            <div className="rounded-lg border border-gray-800 bg-gray-950/80 p-6 text-sm text-gray-500">
+              Loading canonical values…
+            </div>
+          ) : varsResponse ? (
+            <div className="rounded-lg border border-gray-800 overflow-hidden">
+              <div className="flex items-center justify-between border-b border-gray-800 bg-gray-900/80 px-4 py-3">
+                <h3 className="text-sm font-semibold text-gray-300">
+                  {varsResponse.totalKeys} key{varsResponse.totalKeys === 1 ? '' : 's'} in {varsResponse.path}
+                </h3>
+                <span className="text-xs text-gray-500">
+                  Infisical env: {varsResponse.infisicalEnvironment}
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-800 bg-gray-900/80">
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">Key</th>
+                      <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-400">Value</th>
+                      <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-400">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800/60">
+                    {varsResponse.vars.map((entry) => (
+                      <tr key={entry.key} className="hover:bg-gray-800/30">
+                        <td className="px-4 py-3 font-mono text-xs text-gray-200">{entry.key}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-gray-400 max-w-[420px]">
+                          {revealedKeys[entry.key] ? (
+                            <span className="break-all text-green-400">{entry.value}</span>
+                          ) : (
+                            <span className="text-gray-600">********</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => toggleReveal(entry.key)}
+                              className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs font-medium text-gray-400 transition-colors hover:bg-gray-700"
+                            >
+                              {revealedKeys[entry.key] ? 'Hide' : 'Reveal'}
+                            </button>
+                            <button
+                              onClick={() => copyToClipboard(entry.key, entry.value)}
+                              className={`rounded border px-2 py-1 text-xs font-medium transition-colors ${
+                                copied === entry.key
+                                  ? 'border-green-500/30 bg-green-500/20 text-green-400'
+                                  : 'border-gray-700 bg-gray-800 text-gray-400 hover:bg-gray-700'
+                              }`}
+                            >
+                              {copied === entry.key ? 'Copied!' : 'Copy'}
+                            </button>
+                            {!entry.isRuntime && (
+                              <>
+                                <button
+                                  onClick={() => startEdit(entry.key, entry.value)}
+                                  className="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs font-medium text-gray-400 transition-colors hover:bg-gray-700"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => deleteSecret(entry.key)}
+                                  className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-400 transition-colors hover:bg-red-500/20"
+                                >
+                                  Delete
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-gray-800 bg-gray-950/80 p-6 text-sm text-gray-500">
+              Authenticate with the deploy secret to load canonical values.
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <div className="rounded-lg border border-gray-800 bg-gray-900/50 overflow-hidden">
+            <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+              <h2 className="text-sm font-semibold text-gray-300">Infisical Connection</h2>
+              <StatusBadge status={status?.connected ? 'connected' : 'disconnected'} size="md" />
+            </div>
+            <div className="space-y-4 p-6">
+              <InfoItem label="Project ID" value={status?.projectId || '-'} mono />
+              <InfoItem label="Environment" value={status?.environment || '-'} />
+              <InfoItem
+                label="Total Secrets"
+                value={
+                  <span className="text-2xl font-bold tabular-nums text-green-400">
+                    {status?.secretCount ?? 0}
+                  </span>
+                }
+              />
+              {status?.paths && (
+                <div className="grid grid-cols-2 gap-3">
+                  {Object.entries(status.paths).map(([path, count]) => (
+                    <div key={path} className="rounded-lg border border-gray-800 bg-gray-900/80 px-3 py-2">
+                      <span className="text-xs font-mono text-gray-500">{path}</span>
+                      <p className="mt-0.5 text-lg font-bold tabular-nums text-gray-200">{count}</p>
                     </div>
                   ))}
                 </div>
               )}
-
-              <div className="rounded-lg bg-green-500/5 border border-green-500/20 p-4">
-                <p className="text-sm text-green-400/80">
-                  Infisical is connected and managing secrets for this environment.
-                  Secrets are organized under /valet, /ghosthands, and /atm paths.
-                </p>
-              </div>
             </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="rounded-lg bg-yellow-500/5 border border-yellow-500/20 p-4">
-                <p className="text-sm text-yellow-400/80 mb-2">
-                  Infisical is not connected. The server is using environment variables from docker-compose
-                  and/or AWS Secrets Manager as fallback.
-                </p>
-                {status?.error && (
-                  <p className="text-xs text-red-400/80 font-mono mt-2">
-                    Error: {status.error}
-                  </p>
-                )}
-              </div>
+          </div>
 
-              <div>
-                <h3 className="text-sm font-medium text-gray-400 mb-2">Required Configuration</h3>
-                <div className="rounded-lg border border-gray-800 bg-gray-950 p-4 font-mono text-xs text-gray-400 space-y-1">
-                  <p><span className="text-gray-600"># .env variables for Infisical</span></p>
-                  <p>INFISICAL_CLIENT_ID=<span className="text-gray-600">&lt;machine-identity-id&gt;</span></p>
-                  <p>INFISICAL_CLIENT_SECRET=<span className="text-gray-600">&lt;machine-identity-secret&gt;</span></p>
-                  <p>INFISICAL_PROJECT_ID=<span className="text-gray-600">&lt;project-id&gt;</span></p>
-                  <p>INFISICAL_ENVIRONMENT=<span className="text-gray-600">staging | production</span></p>
-                  <p>INFISICAL_SITE_URL=<span className="text-gray-600">https://infisical.yourdomain.com</span></p>
-                </div>
+          {mutationState && (
+            <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
+              <h2 className="text-sm font-semibold text-gray-300">{mutationState.title}</h2>
+              <p className="mt-1 text-xs text-gray-500">
+                {mutationSuccess(mutationState.response) === false
+                  ? 'Canonical write succeeded but one or more downstream targets failed.'
+                  : 'Canonical write and downstream fanout completed.'}
+              </p>
+              <div className="mt-3 space-y-2">
+                {mutationResults(mutationState.response).map((result) => (
+                  <FanoutRow key={result.target} result={result} />
+                ))}
               </div>
             </div>
           )}
-        </div>
-      </div>
 
-      {/* Secrets Provider Stack */}
-      <div>
-        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Provider Precedence</h2>
-        <div className="space-y-2">
-          <ProviderRow
-            number={1}
-            name="Docker Compose env_file"
-            description="Environment variables from docker-compose.yml"
-            status="active"
-          />
-          <ProviderRow
-            number={2}
-            name="Infisical (Self-hosted)"
-            description="Self-hosted secrets manager on Fly.io"
-            status={status?.connected ? 'active' : 'inactive'}
-          />
-          <ProviderRow
-            number={3}
-            name="AWS Secrets Manager"
-            description="Fallback for ghosthands/{environment}"
-            status="fallback"
-          />
+          <div className="rounded-lg border border-gray-800 bg-gray-900/50 p-4">
+            <h2 className="text-sm font-semibold text-gray-300">Operator Rule</h2>
+            <div className="mt-3 space-y-2 text-sm text-gray-400">
+              <p>1. Choose the app and environment.</p>
+              <p>2. Save or delete the key here once.</p>
+              <p>3. ATM updates Infisical, then re-syncs the configured GitHub/AWS/runtime targets.</p>
+            </div>
+          </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function FanoutRow({
+  result,
+}: {
+  result: {
+    target: string;
+    success: boolean;
+    upserted: number;
+    deleted: number;
+    skipped: number;
+    errors: string[];
+  };
+}) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/80 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-mono text-xs text-gray-300">{result.target}</span>
+        <span className={`text-xs font-medium ${result.success ? 'text-green-400' : 'text-red-400'}`}>
+          {result.success ? 'ok' : 'failed'}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-gray-500">
+        upserted {result.upserted}, deleted {result.deleted}, skipped {result.skipped}
+      </p>
+      {result.errors.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {result.errors.map((error) => (
+            <p key={error} className="font-mono text-[11px] text-red-400/80">
+              {error}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -326,37 +623,10 @@ export default function SecretsPage() {
 function InfoItem({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900/80 p-4">
-      <span className="text-gray-500 text-xs uppercase tracking-wider">{label}</span>
-      <div className={`mt-1.5 ${mono ? 'font-mono text-xs' : ''} text-gray-200`}>
+      <span className="text-xs uppercase tracking-wider text-gray-500">{label}</span>
+      <div className={`mt-1.5 text-gray-200 ${mono ? 'font-mono text-xs' : ''}`}>
         {typeof value === 'string' ? <p>{value}</p> : value}
       </div>
-    </div>
-  );
-}
-
-function ProviderRow({
-  number,
-  name,
-  description,
-  status,
-}: {
-  number: number;
-  name: string;
-  description: string;
-  status: 'active' | 'inactive' | 'fallback';
-}) {
-  const borderColor = status === 'active' ? 'border-green-500/30' : 'border-gray-800';
-  const dotColor = status === 'active' ? 'bg-green-400' : status === 'fallback' ? 'bg-yellow-400' : 'bg-gray-600';
-
-  return (
-    <div className={`rounded-lg border ${borderColor} bg-gray-900/50 p-4 flex items-center gap-4`}>
-      <span className="text-lg font-bold text-gray-600 tabular-nums w-6 text-center">{number}</span>
-      <div className={`h-2.5 w-2.5 rounded-full ${dotColor}`} />
-      <div className="flex-1">
-        <p className="text-sm font-medium text-gray-300">{name}</p>
-        <p className="text-xs text-gray-500 mt-0.5">{description}</p>
-      </div>
-      <span className="text-xs text-gray-500 uppercase tracking-wider">{status}</span>
     </div>
   );
 }
