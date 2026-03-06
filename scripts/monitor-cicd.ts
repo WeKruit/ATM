@@ -447,6 +447,10 @@ function readAwsSecret(secretId: string): Record<string, string> | null {
 }
 
 function readEc2EnvValue(key: string): string | null {
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) {
+    throw new Error(`readEc2EnvValue: invalid key "${key}" — must match [A-Z_][A-Z0-9_]*`);
+  }
+
   const host = process.env.ATM_MONITOR_EC2_HOST;
   const keyPath = process.env.ATM_MONITOR_EC2_KEY_PATH;
   if (!host || !keyPath || !existsSync(keyPath)) {

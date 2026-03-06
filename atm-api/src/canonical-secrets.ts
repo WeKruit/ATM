@@ -484,6 +484,10 @@ export function normalizePublicEnvironment(value?: string): CanonicalSecretEnvir
   if (normalized === 'development' || normalized === 'develop' || normalized === 'local' || normalized === 'dev') {
     return 'dev';
   }
+  const validEnvironments: CanonicalSecretEnvironment[] = ['dev', 'staging', 'production'];
+  if (!validEnvironments.includes(normalized as CanonicalSecretEnvironment)) {
+    throw new Error(`Invalid environment "${value}" — must be one of: ${validEnvironments.join(', ')}`);
+  }
   return normalized as CanonicalSecretEnvironment;
 }
 
