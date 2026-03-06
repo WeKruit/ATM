@@ -80,7 +80,9 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
   }
 
   const isExpandedView = selectedEnvironment === 'all' || includeTerminated;
+  const idleStatusLoaded = idleStatus !== null;
   const runningServers: Server[] = [];
+  const unknownServers: Server[] = [];
   const stoppedServers: Server[] = [];
   const terminatedServers: Server[] = [];
 
@@ -90,7 +92,10 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
       continue;
     }
     const state = idleWorkerMap.get(server.id)?.ec2State;
-    if (state === 'terminated') {
+    if (!idleStatusLoaded) {
+      // No idle-status data (auth required or fetch failed) — don't assume running
+      unknownServers.push(server);
+    } else if (state === 'terminated') {
       terminatedServers.push(server);
     } else if (state === 'stopped' || state === 'standby' || state === 'stopping' || state === 'shutting-down') {
       stoppedServers.push(server);
@@ -140,6 +145,16 @@ export default function FleetOverviewPage({ onSelectServer }: FleetOverviewPageP
 
       {isExpandedView ? (
         <div className="space-y-6">
+          {unknownServers.length > 0 && (
+            <div>
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-yellow-400">Unknown State — Authenticate to see EC2 status</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {unknownServers.map((s) => (
+                  <ServerCard key={s.id} server={s} status={statuses[s.id]} idleWorker={null} idleConfig={null} onClick={() => onSelectServer(s.id)} onRefresh={fetchAll} />
+                ))}
+              </div>
+            </div>
+          )}
           <Section title="Running" servers={runningServers} statuses={statuses} idleWorkerMap={idleWorkerMap} idleConfig={idleStatus?.config ?? null} onSelectServer={onSelectServer} onRefresh={fetchAll} />
           <Section title="Stopped" servers={stoppedServers} statuses={statuses} idleWorkerMap={idleWorkerMap} idleConfig={idleStatus?.config ?? null} onSelectServer={onSelectServer} onRefresh={fetchAll} />
           {includeTerminated && (
