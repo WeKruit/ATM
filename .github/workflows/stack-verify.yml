@@ -1,0 +1,53 @@
+name: Stack Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to verify"
+        required: true
+        default: production
+        type: choice
+        options:
+          - staging
+          - production
+          - all
+      mode:
+        description: "Verification mode"
+        required: true
+        default: ci
+        type: choice
+        options:
+          - ci
+          - deploy
+          - full
+      wait:
+        description: "Wait for the dispatched workflows to complete"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Run stack verification
+        env:
+          GH_TOKEN: ${{ secrets.WORKSPACE_GITHUB_TOKEN || secrets.CROSS_REPO_GITHUB_TOKEN || github.token }}
+        run: |
+          bun scripts/stack-verify.ts \
+            --environment "${{ inputs.environment }}" \
+            --mode "${{ inputs.mode }}" \
+            --wait "${{ inputs.wait }}"

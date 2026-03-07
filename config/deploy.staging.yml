@@ -1,18 +1,12 @@
 # Staging destination for Kamal deploys
-# To add a new GH EC2 instance, append its IP to both web and workers hosts:
-#   hosts:
-#     - 44.202.208.128    # gh-worker-1
-#     - 10.0.0.2          # gh-worker-2 (example)
-# Kamal v2 deploys to all hosts in parallel by default.
+# Hosts are injected dynamically at deploy time by kamal-runner.ts
+# using EC2 fleet discovery (AWS_ASG_NAME) or fleet.json.
+# Do NOT commit ephemeral IPs here — they go stale on ASG recycle.
 servers:
   web:
-    hosts:
-      - 44.202.208.128       # gh-worker-1
-      - 35.170.51.196       # gh-worker-2
+    hosts: []
   workers:
-    hosts:
-      - 44.202.208.128       # gh-worker-1
-      - 35.170.51.196       # gh-worker-2
+    hosts: []
 
 env:
   clear:

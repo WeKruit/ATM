@@ -51,17 +51,71 @@ function writeUrlState(tab: Tab, machineId: string | null): void {
   }
 }
 
-function AppContent() {
-  const { servers, setActiveServer } = useFleet();
-
-  // Global deploy secret state
+function AuthWidget() {
+  const [open, setOpen] = useState(false);
   const [secret, setSecret] = useState(() => sessionStorage.getItem('atm-deploy-secret') || '');
-  const [showSecretInput, setShowSecretInput] = useState(false);
+  const isAuthed = !!secret;
 
-  const handleSecretChange = (val: string) => {
+  const handleSave = (val: string) => {
     setSecret(val);
     sessionStorage.setItem('atm-deploy-secret', val);
   };
+
+  const handleClear = () => {
+    setSecret('');
+    sessionStorage.removeItem('atm-deploy-secret');
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors ${
+          isAuthed
+            ? 'bg-green-900/30 text-green-400 border border-green-500/20 hover:bg-green-900/50'
+            : 'bg-yellow-900/30 text-yellow-400 border border-yellow-500/20 hover:bg-yellow-900/50'
+        }`}
+        title={isAuthed ? 'Authenticated' : 'Click to authenticate'}
+      >
+        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          {isAuthed ? (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
+          ) : (
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          )}
+        </svg>
+        {isAuthed ? 'Authenticated' : 'Locked'}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-full mt-2 w-72 rounded-lg border border-gray-700 bg-gray-900 p-3 shadow-xl z-50">
+          <label className="block text-xs text-gray-400 mb-1">Deploy Secret</label>
+          <input
+            type="password"
+            value={secret}
+            onChange={(e) => handleSave(e.target.value)}
+            placeholder="X-Deploy-Secret"
+            className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+            autoFocus
+          />
+          <div className="mt-2 flex items-center justify-between">
+            <span className={`text-xs ${isAuthed ? 'text-green-400' : 'text-gray-500'}`}>
+              {isAuthed ? 'Secret saved to session' : 'Enter deploy secret'}
+            </span>
+            {isAuthed && (
+              <button onClick={handleClear} className="text-xs text-red-400 hover:text-red-300">
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AppContent() {
+  const { servers, setActiveServer } = useFleet();
 
   // Initialize state from URL params
   const initial = useMemo(() => readUrlState(), []);
@@ -134,58 +188,23 @@ function AppContent() {
               </button>
               <span className="text-xs text-gray-500 font-medium">WeKruit Ops</span>
             </div>
-            {/* Machine context badge */}
-            {selectedMachine && isMachineTab(activeTab) && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleBackToFleet}
-                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-                  title="Back to Fleet"
-                >
-                  Fleet /
-                </button>
-                <span className="text-sm font-medium text-gray-300">{selectedMachine.name}</span>
-                <span className="text-xs font-mono text-gray-500">{selectedMachine.ip}</span>
-                <span className={`text-xs px-1.5 py-0.5 rounded ${
-                  selectedMachine.environment === 'production'
-                    ? 'bg-red-900/40 text-red-400 border border-red-500/20'
-                    : 'bg-blue-900/40 text-blue-400 border border-blue-500/20'
-                }`}>{selectedMachine.environment}</span>
-              </div>
-            )}
-
-            {/* Auth controls */}
-            <div className="flex items-center gap-2">
-              {showSecretInput && (
-                <input
-                  type="password"
-                  value={secret}
-                  onChange={(e) => handleSecretChange(e.target.value)}
-                  placeholder="Deploy secret"
-                  className="w-48 bg-gray-800 border border-gray-700 text-gray-300 text-xs rounded-md px-2.5 py-1.5 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-gray-600"
-                  autoFocus
-                  onBlur={() => { if (!secret) setShowSecretInput(false); }}
-                  onKeyDown={(e) => { if (e.key === 'Escape') setShowSecretInput(false); }}
-                />
+            <div className="flex items-center gap-4">
+              {/* Machine context badge */}
+              {selectedMachine && isMachineTab(activeTab) && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleBackToFleet}
+                    className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
+                    title="Back to Fleet"
+                  >
+                    Fleet /
+                  </button>
+                  <span className="text-sm font-medium text-gray-300">{selectedMachine.name}</span>
+                  <span className="text-xs font-mono text-gray-500">{selectedMachine.ip}</span>
+                  <span className="text-xs text-gray-600 bg-gray-800 px-1.5 py-0.5 rounded">{selectedMachine.role}</span>
+                </div>
               )}
-              <button
-                onClick={() => setShowSecretInput(!showSecretInput)}
-                className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  secret
-                    ? 'bg-green-900/30 text-green-400 border border-green-500/20 hover:bg-green-900/50'
-                    : 'bg-gray-800 text-gray-500 border border-gray-700 hover:bg-gray-700'
-                }`}
-                title={secret ? 'Authenticated — click to change secret' : 'Click to enter deploy secret'}
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  {secret ? (
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-                  ) : (
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 119 0v3.75M3.75 21.75h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H3.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-                  )}
-                </svg>
-                {secret ? 'Auth' : 'Lock'}
-              </button>
+              <AuthWidget />
             </div>
           </div>
         </div>

@@ -14,7 +14,8 @@
     "@aws-sdk/client-auto-scaling": "^3.500.0",
     "@aws-sdk/client-ec2": "^3.500.0",
     "@aws-sdk/client-secrets-manager": "^3.500.0",
-    "@infisical/sdk": "^2.3.5"
+    "@infisical/sdk": "^2.3.5",
+    "libsodium-wrappers": "^0.7.15"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",

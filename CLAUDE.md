@@ -89,6 +89,10 @@ docker compose up -d
 - Docker socket access requires appropriate group membership
 - ECR tokens expire every 12h — host cron refreshes every 6h
 
+### E2E Verification Rule
+
+Before reporting completion of any staging/prod change, verify the full UI integration sequence end-to-end (browser → VALET API → ATM → GH worker → frontend rendering). Never report done based on curl probes alone.
+
 ## Testing
 
 ```bash

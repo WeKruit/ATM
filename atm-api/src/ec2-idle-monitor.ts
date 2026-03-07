@@ -219,6 +219,28 @@ export function updateWorkerEc2(serverId: string, ec2State: WorkerIdleState['ec2
   }
 }
 
+/** Add a new worker to the monitor at runtime. */
+export function addWorker(entry: FleetEntry): void {
+  workerStates.set(entry.id, {
+    serverId: entry.id,
+    ip: entry.ip,
+    instanceId: entry.ec2InstanceId ?? null,
+    lastActiveAt: Date.now(),
+    activeJobs: 0,
+    ec2State: 'unknown',
+    transitioning: false,
+    asgName: null,
+    inStandby: false,
+  });
+}
+
+/** Update the instanceId for a worker (after ASG replacement). */
+export function updateWorkerInstanceId(serverId: string, instanceId: string): void {
+  const state = workerStates.get(serverId);
+  if (state) state.instanceId = instanceId;
+}
+
+
 // ── Internal ─────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {

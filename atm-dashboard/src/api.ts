@@ -27,6 +27,32 @@ export async function post<T>(path: string, body: unknown, secret: string, base 
   return res.json();
 }
 
+export async function putWithAuth<T>(path: string, body: unknown, secret: string, base = ''): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Deploy-Secret': secret,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export async function deleteWithAuth<T>(path: string, body: unknown, secret: string, base = ''): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
+    method: 'DELETE',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Deploy-Secret': secret,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
 // ── Fleet types ─────────────────────────────────────────────────
 
 export interface Server {
@@ -42,6 +68,11 @@ export interface Server {
 
 export interface FleetConfig {
   servers: Server[];
+  filter?: {
+    environment: string;
+    includeTerminated: boolean;
+    currentEnvironment: string;
+  };
 }
 
 // ── Secrets types ───────────────────────────────────────────────
@@ -57,6 +88,67 @@ export interface SecretEntry {
   value: string;
 }
 
+export type SecretApp = 'atm' | 'valet' | 'ghosthands';
+export type SecretEnvironment = 'dev' | 'staging' | 'production';
+
+export interface SecretFanoutResult {
+  target: string;
+  success: boolean;
+  upserted: number;
+  deleted: number;
+  skipped: number;
+  errors: string[];
+}
+
+export interface SecretAppMetadata {
+  app: SecretApp;
+  description: string;
+  path: string;
+  environments: SecretEnvironment[];
+  defaultTargets: string[];
+  supportedTargets: string[];
+}
+
+export interface SecretAdminVar {
+  key: string;
+  value: string;
+  isRuntime: boolean;
+}
+
+export interface SecretAdminVarsResponse {
+  app: SecretApp;
+  environment: SecretEnvironment;
+  infisicalEnvironment: string;
+  path: string;
+  defaultTargets: string[];
+  vars: SecretAdminVar[];
+  totalKeys: number;
+}
+
+export interface SecretMutationResponse {
+  app: SecretApp;
+  environment: SecretEnvironment;
+  path: string;
+  upserted?: number;
+  deleted?: number;
+  keys: string[];
+  fanout: {
+    app: SecretApp;
+    environment: SecretEnvironment;
+    requestedTargets: string[];
+    success: boolean;
+    results: SecretFanoutResult[];
+  };
+}
+
+export interface SecretFanoutResponse {
+  app: SecretApp;
+  environment: SecretEnvironment;
+  requestedTargets: string[];
+  success: boolean;
+  results: SecretFanoutResult[];
+}
+
 // ── API response types ──────────────────────────────────────────
 
 export interface HealthResponse {
@@ -70,6 +162,7 @@ export interface HealthResponse {
 }
 
 export interface MetricsResponse {
+  available: boolean;
   cpu: { usagePercent: number; cores: number };
   memory: { usedMb: number; totalMb: number; usagePercent: number };
   disk: { usedGb: number; totalGb: number; usagePercent: number };
@@ -114,6 +207,26 @@ export interface Worker {
   image: string;
 }
 
+export interface IdleStatusWorker {
+  serverId: string;
+  ip: string;
+  instanceId: string;
+  ec2State: string;
+  activeJobs: number;
+  idleSinceMs: number;
+  transitioning: boolean;
+}
+
+export interface IdleStatusResponse {
+  enabled: boolean;
+  config: {
+    idleTimeoutMs: number;
+    minRunning: number;
+    pollIntervalMs: number;
+  };
+  workers: IdleStatusWorker[];
+}
+
 export interface Deploy {
   id: string;
   imageTag: string;
@@ -148,22 +261,4 @@ export interface KamalAuditEntry {
   action: string;
   performer: string;
   details: string;
-}
-
-// ── EC2 idle monitor types ──────────────────────────────────────
-
-export interface IdleStatusWorker {
-  serverId: string;
-  ip: string;
-  instanceId: string | null;
-  ec2State: string;
-  activeJobs: number;
-  idleSinceMs: number;
-  transitioning: boolean;
-}
-
-export interface IdleStatusResponse {
-  enabled: boolean;
-  config: { idleTimeoutMs: number; minRunning: number; pollIntervalMs: number };
-  workers: IdleStatusWorker[];
 }

@@ -15,9 +15,15 @@
  *   POST /cleanup              — Runs disk cleanup (Docker prune + tmp + logs) (requires X-Deploy-Secret)
  *   POST /rollback             — Rollback to last successful deploy (requires X-Deploy-Secret)
  *   POST /admin/refresh-secrets — Re-fetch secrets from Infisical/AWS SM (requires X-Deploy-Secret)
+ *   GET  /admin/secrets/apps   — Canonical app/env secret metadata (requires X-Deploy-Secret)
+ *   GET  /admin/secrets/vars   — Canonical secret values for an app/env (requires X-Deploy-Secret)
+ *   PUT  /admin/secrets/vars   — Upsert canonical secret values + fanout (requires X-Deploy-Secret)
+ *   DELETE /admin/secrets/vars — Delete canonical secret values + fanout (requires X-Deploy-Secret)
+ *   POST /admin/secrets/fanout — Re-sync downstream targets from canonical Infisical values (requires X-Deploy-Secret)
  *   GET  /deploys              — List deploy history records (no auth)
  *   GET  /deploys/:id          — Get a single deploy record by ID (no auth)
  *   GET  /secrets/ghosthands   — Fetch all GH secrets for Mac deploy (requires X-Deploy-Secret)
+ *   GET  /secrets/parity       — Fingerprint parity report for deploy secrets (requires X-Deploy-Secret)
  *   GET  /secrets/status       — Infisical connection status (no auth)
  *   GET  /deploy/stream        — SSE stream for real-time deploy logs (no auth)
  *   GET  /kamal/validate       — Pre-deploy validation checks (no auth)
@@ -41,8 +47,10 @@
  *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
  * Auth:
- *   POST endpoints require X-Deploy-Secret header matching GH_DEPLOY_SECRET env var.
- *   GET endpoints are unauthenticated except /containers and /workers (which require X-Deploy-Secret).
+ *   POST endpoints require X-Deploy-Secret header matching ATM_DEPLOY_SECRET
+ *   (or GH_DEPLOY_SECRET as a temporary fallback).
+ *   GET endpoints are unauthenticated except /containers, /workers, /fleet/idle-status,
+ *   /fleet/:id/workers, and /fleet/:id/* fallback (all require X-Deploy-Secret).
  *
  * Secrets:
  *   On startup, tries Infisical first (self-hosted), falls back to AWS Secrets Manager
@@ -50,10 +58,11 @@
  *   take precedence. Both are non-fatal — if unavailable, process.env is used as-is.
  *
  * Usage:
- *   GH_DEPLOY_SECRET=<secret> bun atm-api/src/server.ts
+ *   ATM_DEPLOY_SECRET=<secret> bun atm-api/src/server.ts
  *
  * Environment:
- *   GH_DEPLOY_SECRET     — Required. Shared secret for deploy auth.
+ *   ATM_DEPLOY_SECRET    — Required. Shared secret for deploy auth.
+ *   GH_DEPLOY_SECRET     — Legacy fallback for deploy auth compatibility.
  *   GH_DEPLOY_PORT       — Port to listen on (default: 8080)
  *   GH_API_PORT          — GH API health port (default: 3100)
  *   GH_WORKER_PORT       — GH worker status port (default: 3101)
@@ -81,13 +90,24 @@ import { getServiceConfigs, type ServiceDefinition } from './container-configs';
 import { getRecords, getRecord, createDeployRecord, updateRecord } from './deploy-history';
 import { executeRollback } from './rollback';
 import { loadSecretsFromInfisical, getInfisicalStatus, listSecretKeys, getSecretValue, fetchSecretsForPath } from './infisical-client';
-import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal } from './kamal-runner';
+import { kamalDeploy, kamalRollback, kamalLockStatus, kamalAudit, isKamalAvailable, spawnKamal, setHostResolver } from './kamal-runner';
 import { preDeployDrain } from './pre-deploy-drain';
 import { deployStream } from './deploy-stream';
 import * as idleMonitor from './ec2-idle-monitor';
-import { startInstance, stopInstance, describeInstance } from './ec2-client';
+import { startInstance, stopInstance, describeInstance, discoverGhInstancesByAsgTag } from './ec2-client';
 import { enterStandby, exitStandby } from './asg-client';
 import path from 'node:path';
+import {
+  resolveDeploySecret,
+  describeSecretFingerprint,
+} from './deploy-secret';
+import {
+  deleteCanonicalSecretVars,
+  fanoutCanonicalSecretVars,
+  getCanonicalSecretApps,
+  listCanonicalSecretVars,
+  upsertCanonicalSecretVars,
+} from './canonical-secrets';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
 
@@ -136,7 +156,6 @@ try {
 await loadSecretsFromAwsSm();
 
 const DEPLOY_PORT = parseInt(process.env.GH_DEPLOY_PORT || '8080', 10);
-const DEPLOY_SECRET = process.env.ATM_DEPLOY_SECRET || process.env.GH_DEPLOY_SECRET;
 const API_HOST = process.env.GH_API_HOST || 'localhost';
 const API_PORT = parseInt(process.env.GH_API_PORT || '3100', 10);
 const WORKER_HOST = process.env.GH_WORKER_HOST || 'localhost';
@@ -146,6 +165,7 @@ const WORKER_PORT = parseInt(process.env.GH_WORKER_PORT || '3101', 10);
 const currentEnvironment: 'staging' | 'production' =
   (process.env.GH_ENVIRONMENT as 'staging' | 'production') ||
   (process.env.NODE_ENV === 'production' ? 'production' : 'staging');
+const deploySecretResolution = resolveDeploySecret(process.env, currentEnvironment);
 
 // ── EC2 Idle Monitor Config ──────────────────────────────────────────
 const EC2_IDLE_ENABLED = process.env.EC2_IDLE_ENABLED === 'true';
@@ -155,6 +175,72 @@ const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000
 
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
+
+function summarizeSecretValue(value?: string | null) {
+  return describeSecretFingerprint(value);
+}
+
+function compareSecretValues(a?: string | null, b?: string | null): boolean | null {
+  if (!a || !b) return null;
+  return a === b;
+}
+
+async function buildDeploySecretParityReport(environment?: string) {
+  const resolvedEnvironment = environment || currentEnvironment;
+  const runtimeAtmSecret = process.env.ATM_DEPLOY_SECRET || null;
+  const runtimeGhSecret = process.env.GH_DEPLOY_SECRET || null;
+  const runtimeResolution = resolveDeploySecret(
+    {
+      ATM_DEPLOY_SECRET: runtimeAtmSecret || undefined,
+      GH_DEPLOY_SECRET: runtimeGhSecret || undefined,
+    },
+    currentEnvironment,
+  );
+
+  const [atmSecrets, ghosthandsSecrets] = await Promise.all([
+    fetchSecretsForPath('/atm', resolvedEnvironment),
+    fetchSecretsForPath('/ghosthands', resolvedEnvironment),
+  ]);
+
+  const infisicalAtmSecret = atmSecrets.ATM_DEPLOY_SECRET || null;
+  const infisicalGhosthandsGhSecret = ghosthandsSecrets.GH_DEPLOY_SECRET || null;
+  const infisicalGhosthandsAtmSecret = ghosthandsSecrets.ATM_DEPLOY_SECRET || null;
+
+  return {
+    runtimeEnvironment: currentEnvironment,
+    requestedEnvironment: resolvedEnvironment,
+    runtime: {
+      resolvedSource: runtimeResolution.source,
+      warning: runtimeResolution.warning || null,
+      ATM_DEPLOY_SECRET: summarizeSecretValue(runtimeAtmSecret),
+      GH_DEPLOY_SECRET: summarizeSecretValue(runtimeGhSecret),
+    },
+    infisical: {
+      '/atm': {
+        ATM_DEPLOY_SECRET: summarizeSecretValue(infisicalAtmSecret),
+      },
+      '/ghosthands': {
+        ATM_DEPLOY_SECRET: summarizeSecretValue(infisicalGhosthandsAtmSecret),
+        GH_DEPLOY_SECRET: summarizeSecretValue(infisicalGhosthandsGhSecret),
+      },
+    },
+    checks: {
+      runtimeSecretsMatch: compareSecretValues(runtimeAtmSecret, runtimeGhSecret),
+      runtimeResolvedMatchesInfisicalAtm: compareSecretValues(
+        runtimeResolution.secret,
+        infisicalAtmSecret,
+      ),
+      infisicalGhosthandsGhMatchesInfisicalAtm: compareSecretValues(
+        infisicalGhosthandsGhSecret,
+        infisicalAtmSecret,
+      ),
+      infisicalGhosthandsAtmMatchesInfisicalAtm: compareSecretValues(
+        infisicalGhosthandsAtmSecret,
+        infisicalAtmSecret,
+      ),
+    },
+  };
+}
 
 // ── Fleet Config ────────────────────────────────────────────────────
 
@@ -197,7 +283,7 @@ function discoverFleetFromKamal(): FleetServer[] {
   if (!configDir) return [];
 
   const discovered: FleetServer[] = [];
-  const seenIps = new Set<string>();
+  const seenTargets = new Set<string>();
   let workerIndex = 1;
 
   for (const dest of ['staging', 'production']) {
@@ -208,8 +294,9 @@ function discoverFleetFromKamal(): FleetServer[] {
       // Collect all unique IPs from web + workers roles
       for (const role of Object.values(hosts)) {
         for (const ip of role) {
-          if (seenIps.has(ip)) continue;
-          seenIps.add(ip);
+          const dedupeKey = `${dest}:${ip}`;
+          if (seenTargets.has(dedupeKey)) continue;
+          seenTargets.add(dedupeKey);
           discovered.push({
             id: `gh-worker-${workerIndex}`,
             name: `GH Worker ${workerIndex}`,
@@ -231,7 +318,46 @@ function discoverFleetFromKamal(): FleetServer[] {
   return discovered;
 }
 
-function loadFleetConfig(): FleetServer[] {
+/**
+ * Derive a stable fleet ID from an EC2 instance ID.
+ * e.g. "i-0de0d236d543467f0" → "gh-d543467f0" (last 9 hex chars)
+ * Stable across ATM restarts. Unique per instance.
+ */
+function deriveFleetId(instanceId: string): string {
+  const stripped = instanceId.replace(/^i-/, '');
+  const suffix = stripped.slice(-9);
+  return `gh-${suffix}`;
+}
+
+const EC2_FLEET_CACHE_TTL_MS = 30_000; // 30 seconds
+let ec2FleetCache: { data: FleetServer[]; expiresAt: number } | null = null;
+
+async function discoverFleetFromEc2(asgName: string): Promise<FleetServer[]> {
+  if (ec2FleetCache && ec2FleetCache.expiresAt > Date.now()) {
+    return ec2FleetCache.data;
+  }
+  const instances = await discoverGhInstancesByAsgTag(asgName);
+  // Sort by instanceId for deterministic display name assignment
+  instances.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+  const servers: FleetServer[] = instances.map((inst, idx) => {
+    const fleetId = deriveFleetId(inst.instanceId);
+    return {
+      id: fleetId,
+      name: `GH Worker ${idx + 1}`,
+      host: `/fleet/${fleetId}`,
+      environment: currentEnvironment,
+      region: process.env.AWS_REGION || 'us-east-1',
+      ip: inst.publicIp ?? '',
+      type: process.env.GH_INSTANCE_TYPE || 't3.large',
+      role: 'ghosthands',
+      ec2InstanceId: inst.instanceId,
+    };
+  });
+  ec2FleetCache = { data: servers, expiresAt: Date.now() + EC2_FLEET_CACHE_TTL_MS };
+  return servers;
+}
+
+async function loadFleetConfig(): Promise<FleetServer[]> {
   // Try FLEET_CONFIG env var first (JSON string)
   if (process.env.FLEET_CONFIG) {
     try {
@@ -258,13 +384,34 @@ function loadFleetConfig(): FleetServer[] {
     }
   }
 
-  // Auto-discover GH hosts from Kamal configs
+  // Priority 2: EC2 ASG tag discovery (dynamic, always current)
+  // When AWS_ASG_NAME is set, EC2 is the SOLE authority for GH workers.
+  // An empty result means zero GH workers — do NOT fall back to Kamal.
+  // An error means discovery is degraded — surface zero GH workers, not stale Kamal data.
+  const asgName = process.env.AWS_ASG_NAME;
+  if (asgName) {
+    const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
+    try {
+      const ec2Hosts = await discoverFleetFromEc2(asgName);
+      fleetServers = [...nonGhEntries, ...ec2Hosts];
+      if (ec2Hosts.length > 0) {
+        console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + ${ec2Hosts.length} from EC2 ASG discovery`);
+      } else {
+        console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + 0 GH workers (ASG ${asgName} is empty)`);
+      }
+    } catch (err) {
+      // EC2 API error — surface zero GH workers, not stale Kamal ghosts
+      fleetServers = [...nonGhEntries];
+      console.error(`[atm-api] EC2 fleet discovery failed — 0 GH workers (not falling back to Kamal):`, err);
+    }
+    return fleetServers;
+  }
+
+  // Priority 3: Kamal auto-discovery (only when ASG mode is NOT configured)
   const kamalHosts = discoverFleetFromKamal();
 
   if (kamalHosts.length > 0) {
-    // Keep non-ghosthands entries from fleet.json (ATM self-entry, etc.)
     const nonGhEntries = jsonServers.filter(s => s.role !== 'ghosthands');
-    // Apply fleet.json overrides: if fleet.json has a GH entry matching an IP, merge its metadata
     const overridesByIp = new Map(
       jsonServers.filter(s => s.role === 'ghosthands').map(s => [s.ip, s])
     );
@@ -275,7 +422,6 @@ function loadFleetConfig(): FleetServer[] {
     fleetServers = [...nonGhEntries, ...mergedGh];
     console.log(`[atm-api] Fleet: ${nonGhEntries.length} static + ${mergedGh.length} auto-discovered from Kamal`);
   } else if (jsonServers.length > 0) {
-    // Kamal configs missing/empty — fall back to fleet.json entirely
     fleetServers = jsonServers;
     console.log(`[atm-api] Loaded ${fleetServers.length} servers from fleet.json (Kamal fallback)`);
   } else {
@@ -302,18 +448,23 @@ interface DeployFailure {
   failedService?: string;
 }
 
-if (!DEPLOY_SECRET) {
-  console.error('[atm-api] FATAL: ATM_DEPLOY_SECRET (or GH_DEPLOY_SECRET) is required');
+if (deploySecretResolution.warning) {
+  console.warn(`[atm-api] ${deploySecretResolution.warning}`);
+}
+
+if (deploySecretResolution.error || !deploySecretResolution.secret) {
+  console.error(`[atm-api] FATAL: ${deploySecretResolution.error || 'No deploy secret configured.'}`);
   process.exit(1);
 }
 
 function verifySecret(req: Request): boolean {
   const header = req.headers.get('x-deploy-secret');
-  if (!header || !DEPLOY_SECRET) return false;
+  const resolved = resolveDeploySecret(process.env, currentEnvironment);
+  if (!header || !resolved.secret) return false;
   try {
     return crypto.timingSafeEqual(
       Buffer.from(header),
-      Buffer.from(DEPLOY_SECRET),
+      Buffer.from(resolved.secret),
     );
   } catch {
     return false;
@@ -623,7 +774,14 @@ if (typeof Bun !== 'undefined') {
     },
   });
 
-  loadFleetConfig();
+  await loadFleetConfig();
+
+  // Wire fleet discovery into Kamal runner so deploys use live IPs, not stale config
+  setHostResolver(() =>
+    fleetServers
+      .filter(s => s.role === 'ghosthands' && s.ip)
+      .map(s => s.ip),
+  );
 
   // Start EC2 idle monitor if enabled
   if (EC2_IDLE_ENABLED) {
@@ -641,6 +799,58 @@ if (typeof Bun !== 'undefined') {
     }).catch(err => console.error('[atm-api] Idle monitor start failed:', err));
     console.log(`[atm-api] EC2 idle monitor enabled (timeout=${EC2_IDLE_TIMEOUT_MS}ms, minRunning=${EC2_MIN_RUNNING})`);
   }
+
+  // Periodic fleet reconciliation: re-discover from EC2 and sync idle monitor
+  const asgNameForReconcile = process.env.AWS_ASG_NAME;
+  if (asgNameForReconcile) {
+    setInterval(async () => {
+      try {
+        ec2FleetCache = null; // Force fresh discovery
+        await loadFleetConfig();
+
+        const currentWorkerStates = idleMonitor.getWorkerStates();
+        const currentStateMap = new Map(currentWorkerStates.map(w => [w.serverId, w]));
+        const ghFleet = fleetServers.filter(s => s.role === 'ghosthands');
+        const discoveredIds = new Set(ghFleet.map(s => s.id));
+
+        // Additions + Updates
+        for (const server of ghFleet) {
+          const existing = currentStateMap.get(server.id);
+          if (!existing) {
+            console.log(`[atm-api] Fleet reconcile: adding ${server.id} (${server.ec2InstanceId}, ${server.ip})`);
+            idleMonitor.addWorker({
+              id: server.id,
+              ip: server.ip,
+              role: server.role,
+              ec2InstanceId: server.ec2InstanceId,
+            });
+          } else {
+            if (server.ip && server.ip !== existing.ip) {
+              console.log(`[atm-api] Fleet reconcile: ${server.id} IP ${existing.ip} → ${server.ip}`);
+              idleMonitor.updateWorkerEc2(server.id, existing.ec2State, server.ip);
+            }
+            if (server.ec2InstanceId && server.ec2InstanceId !== existing.instanceId) {
+              console.log(`[atm-api] Fleet reconcile: ${server.id} instanceId ${existing.instanceId} → ${server.ec2InstanceId}`);
+              idleMonitor.updateWorkerInstanceId(server.id, server.ec2InstanceId);
+            }
+          }
+        }
+
+        // Removals
+        for (const state of currentWorkerStates) {
+          if (state.ec2State === 'terminated') continue;
+          if (!discoveredIds.has(state.serverId)) {
+            console.log(`[atm-api] Fleet reconcile: ${state.serverId} gone from ASG — marking terminated`);
+            idleMonitor.updateWorkerEc2(state.serverId, 'terminated');
+          }
+        }
+      } catch (err) {
+        console.error('[atm-api] Periodic fleet reconciliation failed:', err);
+      }
+    }, EC2_FLEET_CACHE_TTL_MS * 2); // 60s
+    console.log(`[atm-api] Fleet reconciliation enabled (interval=${EC2_FLEET_CACHE_TTL_MS * 2}ms, asg=${asgNameForReconcile})`);
+  }
+
 
   console.log(`[atm-api] Listening on port ${DEPLOY_PORT}`);
   console.log(`[atm-api] GH API: ${API_HOST}:${API_PORT}, Worker: ${WORKER_HOST}:${WORKER_PORT}`);
@@ -664,12 +874,14 @@ async function handleRequest(req: Request): Promise<Response> {
         let workerStatus: Record<string, unknown> | null = null;
 
         if (anyRunning) {
-          // Find a running worker to probe
+          // Find a running worker to probe (dynamic IP from idle monitor, no static env fallback)
           const running = workerStates.find(w => w.ec2State === 'running');
-          const probeIp = running?.ip ?? API_HOST;
-          apiHealth = await fetchJson(`http://${probeIp}:${API_PORT}/health`);
-          workerHealth = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/health`);
-          workerStatus = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/status`);
+          const probeIp = running?.ip ?? null;
+          if (probeIp) {
+            apiHealth = await fetchJson(`http://${probeIp}:${API_PORT}/health`);
+            workerHealth = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/health`);
+            workerStatus = await fetchJson(`http://${probeIp}:${WORKER_PORT}/worker/status`);
+          }
         }
 
         const activeWorkers = (workerStatus?.active_jobs as number) ?? 0;
@@ -690,7 +902,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /version — Unauthenticated version info ─────────
       if (url.pathname === '/version' && req.method === 'GET') {
-        const apiVersion = await fetchJson(`http://${API_HOST}:${API_PORT}/health/version`);
+        const liveGhWorker = fleetServers.find(s => s.role === 'ghosthands' && s.ip);
+        const apiVersion = liveGhWorker
+          ? await fetchJson(`http://${liveGhWorker.ip}:${API_PORT}/health/version`)
+          : null;
         return Response.json({
           deployServer: 'atm-api',
           version: '1.0.0',
@@ -800,8 +1015,12 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 401 },
           );
         }
-        const workerHealth = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/health`);
-        const workerStatus = await fetchJson(`http://${WORKER_HOST}:${WORKER_PORT}/worker/status`);
+        // Resolve worker IP dynamically: fleet → idle monitor → WORKER_HOST fallback
+        const liveGhFleet = fleetServers.find(s => s.role === 'ghosthands' && s.ip);
+        const liveIdleWorker = idleMonitor.getWorkerStates().find(w => w.ec2State === 'running' && w.ip);
+        const workerProbeHost = liveIdleWorker?.ip ?? liveGhFleet?.ip ?? WORKER_HOST;
+        const workerHealth = await fetchJson(`http://${workerProbeHost}:${WORKER_PORT}/worker/health`);
+        const workerStatus = await fetchJson(`http://${workerProbeHost}:${WORKER_PORT}/worker/status`);
 
         const workerId = (workerHealth?.worker_id ?? workerStatus?.worker_id ?? 'unknown') as string;
         const uptimeMs = (workerHealth?.uptime as number) ?? 0;
@@ -838,39 +1057,43 @@ async function handleRequest(req: Request): Promise<Response> {
       // Returns the list of servers ATM knows about.
       // Prefers fleet config (FLEET_CONFIG env or fleet.json), falls back to env vars.
       if (url.pathname === '/fleet' && req.method === 'GET') {
-        if (fleetServers.length > 0) {
-          return Response.json({ servers: fleetServers });
-        }
+        const environmentFilterRaw = url.searchParams.get('environment')?.trim().toLowerCase() ?? '';
+        const includeTerminated =
+          (url.searchParams.get('includeTerminated') ?? '').toLowerCase() === 'true';
+        const requestedEnvironment =
+          environmentFilterRaw === 'all'
+            ? 'all'
+            : environmentFilterRaw === 'production' || environmentFilterRaw === 'staging'
+              ? environmentFilterRaw
+              : currentEnvironment;
 
-        // Fallback: build from env vars (legacy single-server mode)
-        const servers: Array<Record<string, unknown>> = [
-          {
-            id: 'atm-gw1',
-            name: 'ATM Server',
-            host: '', // empty = same origin (dashboard is served from ATM)
-            environment: currentEnvironment,
-            region: process.env.AWS_REGION || 'us-east-1',
-            ip: process.env.ATM_IP || '34.195.147.149',
-            type: process.env.ATM_INSTANCE_TYPE || 't3.large',
-            role: 'atm',
+        const applyFleetFilters = (servers: FleetServer[]): FleetServer[] => {
+          const environmentScoped =
+            requestedEnvironment === 'all'
+              ? servers
+              : servers.filter((s) => s.environment === requestedEnvironment || s.role === 'atm');
+
+          if (includeTerminated) {
+            return environmentScoped;
+          }
+
+          const workerStates = idleMonitor.getWorkerStates();
+          const terminatedIds = new Set(
+            workerStates.filter((w) => w.ec2State === 'terminated').map((w) => w.serverId),
+          );
+          return environmentScoped.filter((s) => !terminatedIds.has(s.id));
+        };
+
+        // Fleet is populated by EC2 ASG discovery (Phase 1) or Kamal config (fallback).
+        // Legacy GH_API_HOST env-var fallback removed — no ghost entries from stale env vars.
+        return Response.json({
+          servers: applyFleetFilters(fleetServers),
+          filter: {
+            environment: requestedEnvironment,
+            includeTerminated,
+            currentEnvironment,
           },
-        ];
-
-        // Add GH worker if configured (GH_API_HOST != localhost means remote)
-        if (API_HOST && API_HOST !== 'localhost' && API_HOST !== '127.0.0.1') {
-          servers.push({
-            id: 'gh-worker-1',
-            name: 'GH Worker 1',
-            host: '/fleet/gh-worker-1', // proxy path — dashboard calls ATM, ATM forwards
-            environment: currentEnvironment,
-            region: process.env.AWS_REGION || 'us-east-1',
-            ip: API_HOST,
-            type: process.env.GH_INSTANCE_TYPE || 't3.large',
-            role: 'ghosthands',
-          });
-        }
-
-        return Response.json({ servers });
+        });
       }
 
       // ── POST /fleet/reload — Reload fleet config from disk ─────
@@ -881,7 +1104,8 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 401 },
           );
         }
-        const servers = loadFleetConfig();
+        ec2FleetCache = null; // Force fresh EC2 discovery
+        const servers = await loadFleetConfig();
         return Response.json({ success: true, count: servers.length, servers });
       }
 
@@ -1216,34 +1440,57 @@ async function handleRequest(req: Request): Promise<Response> {
         const serverId = rest.slice(0, slashIdx);
         const endpoint = rest.slice(slashIdx); // "/health"
 
+        // Fleet proxy endpoints expose worker IPs, system metrics, and build metadata.
+        // Require deploy secret auth now that port 8080 is open to 0.0.0.0/0.
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
         // Self-proxy for ATM's own server
         if (serverId === 'atm-gw1') {
           const selfUrl = new URL(endpoint + url.search, req.url);
           return handleRequest(new Request(selfUrl.toString(), req));
         }
 
-        // Dynamic lookup from fleet config, with env-var fallback for gh-worker-1
-        const fleetEntry = fleetServers.find(s => s.id === serverId)
-          || (serverId === 'gh-worker-1' ? { ip: API_HOST } : null);
+        // Dynamic lookup from fleet config (no env-var fallback — fleet is EC2-discovered)
+        const fleetEntry = fleetServers.find(s => s.id === serverId);
 
-        if (!fleetEntry || !fleetEntry.ip) {
+        if (!fleetEntry) {
           return Response.json({ error: `Unknown server: ${serverId}` }, { status: 404 });
         }
 
-        // Fast-return for ALL endpoints when worker is stopped/standby (avoids timeout probing unreachable hosts)
+        // Offline fast-return BEFORE IP check — stopped workers have no IP but are known fleet members
         const workerState = idleMonitor.getWorkerStates().find(w => w.serverId === serverId);
-        if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping')) {
+        if (workerState && (workerState.ec2State === 'stopped' || workerState.ec2State === 'standby' || workerState.ec2State === 'stopping' || workerState.inStandby)) {
+          // Array-shaped endpoints must return [] to match VALET's expected response types
+          if (endpoint === '/workers' || endpoint === '/containers') {
+            return Response.json([]);
+          }
           return Response.json({
             status: 'offline',
             ec2State: workerState.ec2State,
+            inStandby: workerState.inStandby,
+            serverId,
             activeWorkers: 0,
             deploySafe: false,
             apiHealthy: false,
             workerStatus: 'unreachable',
             currentDeploy: null,
             uptimeMs: 0,
+            message: `Worker is ${workerState.inStandby ? 'in standby' : workerState.ec2State}. Use POST /fleet/${serverId}/wake to start it.`,
           });
         }
+
+        if (!fleetEntry.ip) {
+          return Response.json(
+            { error: `Server ${serverId} has no IP (ec2State: ${workerState?.ec2State ?? 'unknown'})` },
+            { status: 503 },
+          );
+        }
+
 
         const serverIp = workerState?.ip ?? fleetEntry.ip;
         const ghApiBase = `http://${serverIp}:${API_PORT}`;
@@ -1302,8 +1549,9 @@ async function handleRequest(req: Request): Promise<Response> {
           const versionInfo = await safeFetch<{
             version?: string;
             commit_sha?: string;
+            image_tag?: string;
             build_time?: string;
-            uptime?: number;
+            uptime_ms?: number;
           }>(`${ghApiBase}/health/version`);
 
           const ghInfo = apiHealth
@@ -1311,9 +1559,9 @@ async function handleRequest(req: Request): Promise<Response> {
                 service: apiHealth.service ?? 'ghosthands',
                 environment: apiHealth.environment ?? currentEnvironment,
                 commit_sha: versionInfo?.commit_sha ?? apiHealth.commit_sha ?? 'unknown',
-                image_tag: process.env.ECR_IMAGE || 'unknown',
+                image_tag: versionInfo?.image_tag ?? process.env.ECR_IMAGE ?? 'unknown',
                 build_time: versionInfo?.build_time ?? apiHealth.timestamp ?? '',
-                uptime_ms: versionInfo?.uptime ?? 0,
+                uptime_ms: versionInfo?.uptime_ms ?? 0,
                 node_env: apiHealth.environment ?? currentEnvironment,
               }
             : { status: 'unreachable' };
@@ -1361,7 +1609,7 @@ async function handleRequest(req: Request): Promise<Response> {
             status: workerHealth?.status ?? (workerStatus?.is_draining ? 'draining' : workerStatus?.is_running ? 'idle' : 'offline'),
             activeJobs: workerStatus?.active_jobs ?? workerHealth?.active_jobs ?? 0,
             statusPort: WORKER_PORT,
-            uptime: String(workerStatus?.uptime_ms ?? 0),
+            uptime: String(Math.floor((workerStatus?.uptime_ms ?? 0) / 1000)),
             image: process.env.ECR_IMAGE || 'unknown',
           };
 
@@ -1376,14 +1624,11 @@ async function handleRequest(req: Request): Promise<Response> {
             disk: { usedGb: number; totalGb: number; usagePercent: number };
           }>(`${ghApiBase}/health/system`);
 
-          if (sysMetrics) {
-            return Response.json(sysMetrics);
-          }
-
           return Response.json({
-            cpu: { usagePercent: 0, cores: 0 },
-            memory: { usedMb: 0, totalMb: 0, usagePercent: 0 },
-            disk: { usedGb: 0, totalGb: 0, usagePercent: 0 },
+            available: sysMetrics !== null,
+            cpu: sysMetrics?.cpu ?? { usagePercent: 0, cores: 0 },
+            memory: sysMetrics?.memory ?? { usedMb: 0, totalMb: 0, usagePercent: 0 },
+            disk: sysMetrics?.disk ?? { usedGb: 0, totalGb: 0, usagePercent: 0 },
           });
         }
 
@@ -1444,6 +1689,27 @@ async function handleRequest(req: Request): Promise<Response> {
         const keys = await listSecretKeys(secretPath);
         return Response.json(keys);
       }
+
+      // ── GET /secrets/parity — Compare masked deploy-secret fingerprints ──
+      if (url.pathname === '/secrets/parity' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+
+        const environment = url.searchParams.get('environment') || undefined;
+
+        try {
+          const report = await buildDeploySecretParityReport(environment);
+          return Response.json(report);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 500 });
+        }
+      }
+
 
       // ── GET /secrets/ghosthands — Fetch all GH secrets for Mac deploy ──
       // Optional query param: ?environment=staging (default: INFISICAL_ENVIRONMENT)
@@ -1609,7 +1875,10 @@ async function handleRequest(req: Request): Promise<Response> {
 
         console.log('[atm-api] Drain requested');
         try {
-          await drainService(`http://${WORKER_HOST}:${WORKER_PORT}/drain`, 60_000);
+          const drainGhFleet = fleetServers.find(s => s.role === 'ghosthands' && s.ip);
+          const drainIdleWorker = idleMonitor.getWorkerStates().find(w => w.ec2State === 'running' && w.ip);
+          const drainHost = drainIdleWorker?.ip ?? drainGhFleet?.ip ?? WORKER_HOST;
+          await drainService(`http://${drainHost}:${WORKER_PORT}/drain`, 60_000);
           return Response.json({ success: true, message: 'Drain complete' });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1775,6 +2044,131 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json(rollbackResult);
         } else {
           return Response.json(rollbackResult, { status: 400 });
+        }
+      }
+
+      // ── GET /admin/secrets/apps — Canonical app/env secret metadata ──
+      if (url.pathname === '/admin/secrets/apps' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        return Response.json({
+          apps: getCanonicalSecretApps(),
+        });
+      }
+
+      // ── GET /admin/secrets/vars — Canonical secret values for app/env ──
+      if (url.pathname === '/admin/secrets/vars' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        const app = url.searchParams.get('app') || '';
+        const environment = url.searchParams.get('environment') || '';
+
+        try {
+          const payload = await listCanonicalSecretVars(app, environment);
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
+        }
+      }
+
+      // ── PUT /admin/secrets/vars — Canonical upsert + fanout ────────
+      if (url.pathname === '/admin/secrets/vars' && req.method === 'PUT') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        try {
+          const body = (await req.json()) as {
+            app?: string;
+            environment?: string;
+            vars?: Array<{ key: string; value: string }>;
+            fanout?: 'auto' | string[];
+          };
+
+          const targets = Array.isArray(body.fanout) ? body.fanout as any : undefined;
+          const payload = await upsertCanonicalSecretVars(
+            body.app || '',
+            body.environment || '',
+            body.vars || [],
+            targets,
+          );
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
+        }
+      }
+
+      // ── DELETE /admin/secrets/vars — Canonical delete + fanout ──────
+      if (url.pathname === '/admin/secrets/vars' && req.method === 'DELETE') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        try {
+          const body = (await req.json()) as {
+            app?: string;
+            environment?: string;
+            keys?: string[];
+            fanout?: 'auto' | string[];
+          };
+
+          const targets = Array.isArray(body.fanout) ? body.fanout as any : undefined;
+          const payload = await deleteCanonicalSecretVars(
+            body.app || '',
+            body.environment || '',
+            body.keys || [],
+            targets,
+          );
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
+        }
+      }
+
+      // ── POST /admin/secrets/fanout — Re-sync downstream targets ─────
+      if (url.pathname === '/admin/secrets/fanout' && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { success: false, message: 'Unauthorized' },
+            { status: 401 },
+          );
+        }
+
+        try {
+          const body = (await req.json()) as {
+            app?: string;
+            environment?: string;
+            targets?: string[];
+          };
+
+          const payload = await fanoutCanonicalSecretVars(
+            body.app || '',
+            body.environment || '',
+            Array.isArray(body.targets) ? body.targets as any : undefined,
+          );
+          return Response.json(payload);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: msg }, { status: 400 });
         }
       }
 

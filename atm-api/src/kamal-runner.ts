@@ -197,6 +197,7 @@ export function setSecretsFetcherImpl(fn: SecretsFetcher | null): void {
 
 /** The secrets Kamal deploy.yml declares under env.secret */
 const KAMAL_SECRET_KEYS = [
+  'ATM_DEPLOY_SECRET',
   'GH_ENVIRONMENT',
   'DATABASE_URL',
   'DATABASE_DIRECT_URL',
@@ -222,7 +223,7 @@ const KAMAL_SECRET_KEYS = [
 /**
  * Fetches all secrets needed for a Kamal deploy:
  *  1. KAMAL_REGISTRY_PASSWORD — ECR token via SSH to GH EC2
- *  2. GH app secrets — from Infisical API (/ghosthands path)
+ *  2. GH app secrets — from Infisical API (/ghosthands + /atm paths)
  *
  * Maps destination to Infisical environment: staging→staging, production→prod
  */
@@ -256,10 +257,15 @@ export async function fetchSecretsForKamalDeploy(
 
   // 2. Fetch GH secrets from Infisical REST API
   const infisicalEnv = destination === 'production' ? 'prod' : 'staging';
-  console.log(`[kamal-runner] Fetching secrets from Infisical (env=${infisicalEnv}, path=/ghosthands)...`);
+  console.log(`[kamal-runner] Fetching secrets from Infisical (env=${infisicalEnv}, paths=/ghosthands,/atm)...`);
 
   try {
-    const allSecrets = await fetchSecretsForPath('/ghosthands', infisicalEnv);
+    // Fetch secrets from both /ghosthands and /atm paths, merge into one map
+    const [ghSecrets, atmSecrets] = await Promise.all([
+      fetchSecretsForPath('/ghosthands', infisicalEnv),
+      fetchSecretsForPath('/atm', infisicalEnv).catch(() => ({} as Record<string, string>)),
+    ]);
+    const allSecrets: Record<string, string> = { ...atmSecrets, ...ghSecrets };
 
     // Map required keys
     let found = 0;
@@ -313,6 +319,50 @@ async function writeSecretsFiles(
   console.log(`[kamal-runner] Wrote secrets files (.kamal/secrets-common + .kamal/secrets.${destination})`);
 }
 
+// ── Host resolver injection (for dynamic fleet IPs) ──────────────────
+
+type HostResolver = () => string[];
+let hostResolverImpl: HostResolver | null = null;
+
+/**
+ * Sets a function that returns the current GH worker IPs.
+ * Called by server.ts to inject the fleet discovery results.
+ */
+export function setHostResolver(resolver: HostResolver): void {
+  hostResolverImpl = resolver;
+}
+
+/**
+ * Writes the Kamal destination config with dynamically discovered hosts.
+ * Prevents committing ephemeral ASG IPs to deploy.staging.yml.
+ */
+async function injectFleetHosts(destination: string): Promise<void> {
+  if (!hostResolverImpl) return;
+
+  const hosts = hostResolverImpl();
+  if (hosts.length === 0) {
+    console.log(`[kamal-runner] No fleet hosts discovered — skipping host injection for ${destination}`);
+    return;
+  }
+
+  const configPath = `config/deploy.${destination}.yml`;
+  try {
+    const raw = await Bun.file(configPath).text();
+
+    // Replace empty hosts arrays with discovered IPs
+    const hostYaml = hosts.map(ip => `      - ${ip}`).join('\n');
+    const updated = raw.replace(
+      /hosts:\s*\[\s*\]/g,
+      `hosts:\n${hostYaml}`,
+    );
+
+    await Bun.write(configPath, updated);
+    console.log(`[kamal-runner] Injected ${hosts.length} fleet host(s) into ${configPath}: ${hosts.join(', ')}`);
+  } catch (err) {
+    console.log(`[kamal-runner] Could not inject hosts into ${configPath}: ${err}`);
+  }
+}
+
 /**
  * Runs a Kamal deploy for the given destination.
  * Fetches secrets from Infisical + ECR, writes them to .kamal/secrets files,
@@ -327,6 +377,9 @@ export async function kamalDeploy(
   version?: string,
   onLine?: (line: string) => void,
 ): Promise<KamalResult> {
+  // Inject dynamically discovered fleet hosts into Kamal destination config
+  await injectFleetHosts(destination);
+
   // Fetch all secrets and write to files + inject as env vars
   const fetcher = secretsFetcherImpl ?? fetchSecretsForKamalDeploy;
   const secretEnv = await fetcher(destination);

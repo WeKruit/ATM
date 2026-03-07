@@ -2,12 +2,28 @@ name: CI — ATM
 
 on:
     workflow_call: {}
+    workflow_dispatch: {}
     push:
         branches: [main, staging]
     pull_request:
         branches: [main]
 
 jobs:
+    ops-monitor:
+        name: Ops Monitor — unit tests
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: latest
+
+            - name: Unit tests
+              run: bun test scripts/monitor-cicd.test.ts scripts/stack-verify-lib.test.ts
+
     atm-api:
         name: ATM API — typecheck + test
         runs-on: ubuntu-latest

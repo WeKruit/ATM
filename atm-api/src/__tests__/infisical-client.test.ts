@@ -1,5 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { getInfisicalConfig, getInfisicalStatus, loadSecretsFromInfisical } from '../infisical-client';
+import {
+  getInfisicalConfig,
+  getInfisicalStatus,
+  loadSecretsFromInfisical,
+  normalizeInfisicalEnvironment,
+} from '../infisical-client';
 
 describe('infisical-client', () => {
   const savedEnv: Record<string, string | undefined> = {};
@@ -72,6 +77,21 @@ describe('infisical-client', () => {
       process.env.INFISICAL_SITE_URL = 'https://infisical.example.com';
       // Missing client_id, client_secret, project_id
       expect(getInfisicalConfig()).toBeNull();
+    });
+  });
+
+  describe('normalizeInfisicalEnvironment', () => {
+    test('maps production to prod', () => {
+      expect(normalizeInfisicalEnvironment('production')).toBe('prod');
+    });
+
+    test('maps development aliases to dev', () => {
+      expect(normalizeInfisicalEnvironment('development')).toBe('dev');
+      expect(normalizeInfisicalEnvironment('local')).toBe('dev');
+    });
+
+    test('passes staging through unchanged', () => {
+      expect(normalizeInfisicalEnvironment('staging')).toBe('staging');
     });
   });
 

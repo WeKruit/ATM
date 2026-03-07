@@ -4,6 +4,7 @@ import type { Container, Worker } from '../api';
 import { useFleet } from '../context/FleetContext';
 import StatusBadge from '../components/StatusBadge';
 import DataTable, { type Column } from '../components/DataTable';
+import { formatUptime } from '../utils/format';
 
 const containerColumns: Column<Container>[] = [
   {
@@ -91,7 +92,7 @@ const workerColumns: Column<Worker>[] = [
     key: 'uptime',
     label: 'Uptime',
     align: 'right' as const,
-    render: (row) => <span className="text-gray-400 text-xs">{row.uptime}s</span>,
+    render: (row) => <span className="text-gray-400 text-xs">{formatUptime(Number(row.uptime))}</span>,
   },
 ];
 
@@ -107,21 +108,11 @@ export default function FleetPage() {
 
   const fetchAll = useCallback(async () => {
     if (!activeServer) return;
-    const secret = sessionStorage.getItem('atm-deploy-secret') || '';
     try {
+      const secret = sessionStorage.getItem('atm-deploy-secret') || '';
       const [c, w] = await Promise.all([
-        secret
-          ? getWithAuth<Container[]>('/containers', secret, base).catch((err) => {
-              if (err?.message?.startsWith('401')) setAuthError(true);
-              return [] as Container[];
-            })
-          : Promise.resolve([] as Container[]),
-        secret
-          ? getWithAuth<Worker[]>('/workers', secret, base).catch((err) => {
-              if (err?.message?.startsWith('401')) setAuthError(true);
-              return [] as Worker[];
-            })
-          : Promise.resolve([] as Worker[]),
+        getWithAuth<Container[]>('/containers', secret, base).catch(() => [] as Container[]),
+        getWithAuth<Worker[]>('/workers', secret, base).catch(() => [] as Worker[]),
       ]);
       setContainers(c);
       setWorkers(w);
