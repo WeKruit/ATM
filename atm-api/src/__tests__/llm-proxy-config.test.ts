@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
   getAnthropicProxyConfig,
+  getLlmProxyServiceTokens,
+  getManagedLlmRuntimeProfile,
   getLlmProxyServiceToken,
   verifyLlmProxyServiceToken,
 } from "../llm-proxy-config";
@@ -38,6 +40,12 @@ describe("llm proxy config", () => {
     expect(getLlmProxyServiceToken()).toBe("preferred-token");
   });
 
+  it("supports token rotation via VALET_ATM_TOKENS", () => {
+    process.env.VALET_ATM_TOKENS = "next-token, current-token";
+
+    expect(getLlmProxyServiceTokens()).toEqual(["next-token", "current-token"]);
+  });
+
   it("verifies the dedicated bearer token", () => {
     process.env.VALET_ATM_TOKEN = "atm-runtime-token";
     const req = new Request("https://atm.example.com/internal/llm-proxy-config", {
@@ -52,5 +60,22 @@ describe("llm proxy config", () => {
       headers: { Authorization: "Bearer wrong-token" },
     });
     expect(verifyLlmProxyServiceToken(req)).toBe(false);
+  });
+
+  it("returns the desktop managed runtime profile", () => {
+    process.env.ANTHROPIC_API_KEY = "anthropic-secret";
+
+    expect(getManagedLlmRuntimeProfile("desktop-default")).toEqual({
+      profileKey: "desktop-default",
+      transport: "anthropic-messages",
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      apiKey: "anthropic-secret",
+      defaultModel: "claude-sonnet-4-20250514",
+      allowedModels: [
+        "claude-sonnet-4-20250514",
+        "claude-haiku-4-5-20251001",
+      ],
+    });
   });
 });
