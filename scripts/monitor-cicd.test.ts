@@ -43,7 +43,7 @@ describe("monitor-cicd-lib", () => {
       productionPolicies.some((policy) => policy.workflowRef === "integration-test.yml"),
     ).toBe(false);
     expect(
-      productionPolicies.some((policy) => String(policy.workflowRef) === "240340825"),
+      productionPolicies.some((policy) => policy.workflowRef === "publish-engine.yml"),
     ).toBe(false);
   });
 
@@ -206,6 +206,39 @@ describe("monitor-cicd", () => {
     expect(
       report.blockers.some(
         (issue) => issue.target === "WeKruit/ATM / CD → ATM API (EC2)",
+      ),
+    ).toBe(true);
+  });
+
+  test("keeps the report running when a warning-only workflow lookup fails", async () => {
+    const report = await buildReport(
+      "production",
+      createDeps({
+        listWorkflowRuns: async (policy) => {
+          if (policy.monitorMode !== "latest-run") return [];
+          if (policy.repo === "WeKruit/GH-Desktop-App" && policy.workflowRef === "ci.yml") {
+            throw new Error("404 Not Found");
+          }
+
+          return [SUCCESS_RUN];
+        },
+      }),
+    );
+
+    expect(report.overallStatus).toBe("warning");
+    expect(
+      report.warnings.some(
+        (issue) =>
+          issue.target === "WeKruit/GH-Desktop-App / CI/CD" &&
+          issue.message.includes("Could not load workflow runs via GitHub Actions API"),
+      ),
+    ).toBe(true);
+    expect(
+      report.workflows.some(
+        (record) =>
+          record.repo === "WeKruit/GH-Desktop-App" &&
+          record.workflow === "CI/CD" &&
+          record.status === "lookup-failed",
       ),
     ).toBe(true);
   });

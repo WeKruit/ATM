@@ -180,7 +180,7 @@ export const WORKFLOW_POLICIES: WorkflowPolicy[] = [
   },
   {
     repo: "WeKruit/GHOST-HANDS",
-    workflowRef: 240340825,
+    workflowRef: "publish-engine.yml",
     displayName: "Publish Engine",
     environments: ["staging"],
     branch: "staging",
@@ -422,10 +422,16 @@ export function selectLatestMeaningfulRun(
   }
 
   let skippedCancelledCount = 0;
+  let firstCancelledRun: WorkflowRunSummary | null = null;
+  let firstCancelledAssessment: WorkflowAssessment | null = null;
   for (const run of runs) {
     const assessment = evaluateWorkflowRun(run, now, staleMinutes, severity);
     if (assessment.status === "cancelled") {
       skippedCancelledCount += 1;
+      if (!firstCancelledRun) {
+        firstCancelledRun = run;
+        firstCancelledAssessment = assessment;
+      }
       continue;
     }
 
@@ -445,8 +451,9 @@ export function selectLatestMeaningfulRun(
   }
 
   return {
-    run: runs[0] ?? null,
-    assessment: evaluateWorkflowRun(runs[0] ?? null, now, staleMinutes, severity),
+    run: firstCancelledRun,
+    assessment:
+      firstCancelledAssessment ?? evaluateWorkflowRun(firstCancelledRun, now, staleMinutes, severity),
     skippedCancelledCount,
   };
 }

@@ -210,6 +210,14 @@ function pushIssue(collection: IssueRecord[], level: IssueLevel, issue: IssueRec
   collection.push(issue);
 }
 
+function levelForWorkflowSeverity(severity: WorkflowPolicy["severity"]): IssueLevel {
+  return severity === "blocker" ? "blocker" : "warning";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function normalizeWorkflowRun(raw: Record<string, unknown>): WorkflowRunSummary {
   return {
     workflowName:
@@ -297,38 +305,93 @@ export async function collectWorkflowRecords(
     if (policy.monitorMode === "disabled") continue;
 
     if (policy.monitorMode === "existence-only") {
-      const exists = await getWorkflowExists(policy);
-      const assessment = evaluateWorkflowExistence(exists, policy.severity);
-      const record: WorkflowRecord = {
+      try {
+        const exists = await getWorkflowExists(policy);
+        const assessment = evaluateWorkflowExistence(exists, policy.severity);
+        const record: WorkflowRecord = {
+          environment,
+          repo: policy.repo,
+          workflow: policy.displayName,
+          branch: policy.branch,
+          level: assessment.level,
+          status: assessment.status,
+          message: assessment.message,
+          ageMinutes: assessment.ageMinutes,
+          url: null,
+          updatedAt: null,
+          workflowRef: String(policy.workflowRef),
+          monitorMode: policy.monitorMode,
+          severity: policy.severity,
+        };
+        records.push(record);
+        pushIssue(
+          assessment.level === "blocker" ? blockers : warnings,
+          assessment.level,
+          {
+            environment,
+            category: "workflow",
+            target: `${policy.repo} / ${policy.displayName}`,
+            message: assessment.message,
+          },
+        );
+      } catch (error) {
+        const level = levelForWorkflowSeverity(policy.severity);
+        const message = `Could not load workflow metadata via GitHub Actions API: ${errorMessage(error)}`;
+        records.push({
+          environment,
+          repo: policy.repo,
+          workflow: policy.displayName,
+          branch: policy.branch,
+          level,
+          status: "lookup-failed",
+          message,
+          ageMinutes: null,
+          url: null,
+          updatedAt: null,
+          workflowRef: String(policy.workflowRef),
+          monitorMode: policy.monitorMode,
+          severity: policy.severity,
+        });
+        pushIssue(level === "blocker" ? blockers : warnings, level, {
+          environment,
+          category: "workflow",
+          target: `${policy.repo} / ${policy.displayName}`,
+          message,
+        });
+      }
+      continue;
+    }
+
+    let runs: WorkflowRunSummary[];
+    try {
+      runs = await listWorkflowRuns(policy);
+    } catch (error) {
+      const level = levelForWorkflowSeverity(policy.severity);
+      const message = `Could not load workflow runs via GitHub Actions API: ${errorMessage(error)}`;
+      records.push({
         environment,
         repo: policy.repo,
         workflow: policy.displayName,
         branch: policy.branch,
-        level: assessment.level,
-        status: assessment.status,
-        message: assessment.message,
-        ageMinutes: assessment.ageMinutes,
+        level,
+        status: "lookup-failed",
+        message,
+        ageMinutes: null,
         url: null,
         updatedAt: null,
         workflowRef: String(policy.workflowRef),
         monitorMode: policy.monitorMode,
         severity: policy.severity,
-      };
-      records.push(record);
-      pushIssue(
-        assessment.level === "blocker" ? blockers : warnings,
-        assessment.level,
-        {
-          environment,
-          category: "workflow",
-          target: `${policy.repo} / ${policy.displayName}`,
-          message: assessment.message,
-        },
-      );
+      });
+      pushIssue(level === "blocker" ? blockers : warnings, level, {
+        environment,
+        category: "workflow",
+        target: `${policy.repo} / ${policy.displayName}`,
+        message,
+      });
       continue;
     }
 
-    const runs = await listWorkflowRuns(policy);
     const { run, assessment } = selectLatestMeaningfulRun(
       runs,
       now,
