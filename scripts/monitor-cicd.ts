@@ -4,21 +4,25 @@ import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   SECRET_SCOPE_RULES,
-  WORKFLOW_CONFIG,
   compareFingerprints,
-  environmentToBranch,
   evaluateSecretScope,
-  evaluateWorkflowRun,
+  evaluateWorkflowExistence,
   fingerprintSecretValue,
+  getWorkflowPoliciesForEnvironment,
   mergeLevels,
+  selectLatestMeaningfulRun,
   type IssueLevel,
   type MonitorEnvironment,
+  type WorkflowPolicy,
+  type WorkflowRunSummary,
+  buildWorkflowMetadataApiPath,
+  buildWorkflowRunsApiPath,
 } from "./monitor-cicd-lib";
 import { fetchSecretsForPath } from "../atm-api/src/infisical-client";
 
 type MonitorEnvironmentInput = MonitorEnvironment | "all";
 
-interface WorkflowRecord {
+export interface WorkflowRecord {
   environment: MonitorEnvironment;
   repo: string;
   workflow: string;
@@ -29,9 +33,12 @@ interface WorkflowRecord {
   ageMinutes: number | null;
   url: string | null;
   updatedAt: string | null;
+  workflowRef?: string;
+  monitorMode?: "latest-run" | "existence-only" | "disabled";
+  severity?: "blocker" | "warning";
 }
 
-interface InfrastructureRecord {
+export interface InfrastructureRecord {
   environment: MonitorEnvironment;
   name: string;
   level: IssueLevel;
@@ -40,7 +47,7 @@ interface InfrastructureRecord {
   details?: Record<string, unknown>;
 }
 
-interface SecretRecord {
+export interface SecretRecord {
   environment: MonitorEnvironment;
   target: string;
   level: IssueLevel;
@@ -49,14 +56,14 @@ interface SecretRecord {
   details?: Record<string, unknown>;
 }
 
-interface IssueRecord {
+export interface IssueRecord {
   environment: MonitorEnvironment;
   category: "workflow" | "infrastructure" | "secrets";
   target: string;
   message: string;
 }
 
-interface MonitorReport {
+export interface MonitorReport {
   checkedAt: string;
   environment: MonitorEnvironmentInput;
   overallStatus: IssueLevel;
@@ -72,8 +79,31 @@ interface RunCommandOptions {
   env?: Record<string, string | undefined>;
 }
 
-const DEFAULT_ATM_API_URL = process.env.ATM_MONITOR_ATM_API_URL || "http://atm-direct.wekruit.com:8080";
-const DEFAULT_ATM_INSTANCE_NAME = process.env.ATM_MONITOR_ATM_INSTANCE_NAME || "wekruit-atm-server";
+type WorkflowRunsLoader = (policy: WorkflowPolicy) => Promise<WorkflowRunSummary[]>;
+type WorkflowExistsLoader = (policy: WorkflowPolicy) => Promise<boolean>;
+type InfrastructureCollector = (
+  environment: MonitorEnvironment,
+  blockers: IssueRecord[],
+  warnings: IssueRecord[],
+) => Promise<InfrastructureRecord[]>;
+type SecretCollector = (
+  environment: MonitorEnvironment,
+  blockers: IssueRecord[],
+  warnings: IssueRecord[],
+) => Promise<SecretRecord[]>;
+
+export interface MonitorDependencies {
+  now?: Date;
+  listWorkflowRuns?: WorkflowRunsLoader;
+  getWorkflowExists?: WorkflowExistsLoader;
+  collectInfrastructureRecords?: InfrastructureCollector;
+  collectSecretRecords?: SecretCollector;
+}
+
+const DEFAULT_ATM_API_URL =
+  process.env.ATM_MONITOR_ATM_API_URL || "http://atm-direct.wekruit.com:8080";
+const DEFAULT_ATM_INSTANCE_NAME =
+  process.env.ATM_MONITOR_ATM_INSTANCE_NAME || "wekruit-atm-server";
 const DEFAULT_EC2_ENV_FILE = process.env.ATM_MONITOR_EC2_ENV_FILE || "/opt/atm/.env";
 const DEFAULT_EC2_USER = process.env.ATM_MONITOR_EC2_USER || "ubuntu";
 const DEFAULT_STALE_MINUTES = Number(process.env.ATM_MONITOR_MAX_RUN_AGE_MINUTES || "20");
@@ -140,13 +170,17 @@ function runCommand(command: string, args: string[], options: RunCommandOptions 
     if (options.allowFailure) {
       return "";
     }
-    const stderr = error?.stderr?.toString?.().trim?.() || error?.message || "Unknown command failure";
+    const stderr =
+      error?.stderr?.toString?.().trim?.() || error?.message || "Unknown command failure";
     throw new Error(`${command} ${args.join(" ")} failed: ${stderr}`);
   }
 }
 
 function runJson<T>(command: string, args: string[], options: RunCommandOptions = {}): T | null {
-  const output = runCommand(command, args, { ...options, allowFailure: options.allowFailure ?? false });
+  const output = runCommand(command, args, {
+    ...options,
+    allowFailure: options.allowFailure ?? false,
+  });
   if (!output) return null;
   return JSON.parse(output) as T;
 }
@@ -163,109 +197,234 @@ async function fetchJson(url: string): Promise<Record<string, unknown> | null> {
   }
 }
 
+function githubEnv(): Record<string, string | undefined> {
+  return { GH_TOKEN: process.env.GH_TOKEN || process.env.GITHUB_TOKEN };
+}
+
 function environmentList(environment: MonitorEnvironmentInput): MonitorEnvironment[] {
   return environment === "all" ? ["staging", "production"] : [environment];
 }
 
-function pushIssue(
-  collection: IssueRecord[],
-  level: IssueLevel,
-  issue: IssueRecord,
-) {
-  if (level === "ok") return;
+function pushIssue(collection: IssueRecord[], level: IssueLevel, issue: IssueRecord) {
+  if (level === "ok" || level === "skip") return;
   collection.push(issue);
 }
 
-function latestRunByWorkflow(
-  runs: Array<Record<string, unknown>>,
-  workflowName: string,
-): Record<string, unknown> | null {
-  return (
-    runs.find((run) => String(run.workflowName || run.name || "") === workflowName) || null
-  );
+function levelForWorkflowSeverity(severity: WorkflowPolicy["severity"]): IssueLevel {
+  return severity === "blocker" ? "blocker" : "warning";
 }
 
-async function collectWorkflowRecords(
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeWorkflowRun(raw: Record<string, unknown>): WorkflowRunSummary {
+  return {
+    workflowName:
+      typeof raw.name === "string"
+        ? raw.name
+        : typeof raw.workflowName === "string"
+          ? raw.workflowName
+          : undefined,
+    displayTitle:
+      typeof raw.display_title === "string"
+        ? raw.display_title
+        : typeof raw.displayTitle === "string"
+          ? raw.displayTitle
+          : undefined,
+    status: typeof raw.status === "string" ? raw.status : undefined,
+    conclusion:
+      typeof raw.conclusion === "string" || raw.conclusion === null
+        ? (raw.conclusion as string | null)
+        : null,
+    createdAt:
+      typeof raw.created_at === "string"
+        ? raw.created_at
+        : typeof raw.createdAt === "string"
+          ? raw.createdAt
+          : undefined,
+    startedAt:
+      typeof raw.run_started_at === "string"
+        ? raw.run_started_at
+        : typeof raw.startedAt === "string"
+          ? raw.startedAt
+          : undefined,
+    updatedAt:
+      typeof raw.updated_at === "string"
+        ? raw.updated_at
+        : typeof raw.updatedAt === "string"
+          ? raw.updatedAt
+          : undefined,
+    url:
+      typeof raw.html_url === "string"
+        ? raw.html_url
+        : typeof raw.url === "string"
+          ? raw.url
+          : undefined,
+  };
+}
+
+async function defaultListWorkflowRuns(policy: WorkflowPolicy): Promise<WorkflowRunSummary[]> {
+  const payload =
+    runJson<{ workflow_runs?: Array<Record<string, unknown>> }>(
+      "gh",
+      ["api", buildWorkflowRunsApiPath(policy, DEFAULT_GH_RUN_LIMIT)],
+      { env: githubEnv() },
+    ) || {};
+
+  return Array.isArray(payload.workflow_runs)
+    ? payload.workflow_runs.map((run) => normalizeWorkflowRun(run))
+    : [];
+}
+
+async function defaultGetWorkflowExists(policy: WorkflowPolicy): Promise<boolean> {
+  const payload = runJson<Record<string, unknown>>(
+    "gh",
+    ["api", buildWorkflowMetadataApiPath(policy)],
+    {
+      allowFailure: true,
+      env: githubEnv(),
+    },
+  );
+
+  return payload !== null;
+}
+
+export async function collectWorkflowRecords(
   environment: MonitorEnvironment,
   blockers: IssueRecord[],
   warnings: IssueRecord[],
+  deps: Pick<MonitorDependencies, "now" | "listWorkflowRuns" | "getWorkflowExists"> = {},
 ): Promise<WorkflowRecord[]> {
-  const branch = environmentToBranch(environment);
   const records: WorkflowRecord[] = [];
+  const now = deps.now ?? new Date();
+  const listWorkflowRuns = deps.listWorkflowRuns ?? defaultListWorkflowRuns;
+  const getWorkflowExists = deps.getWorkflowExists ?? defaultGetWorkflowExists;
 
-  for (const repoConfig of WORKFLOW_CONFIG) {
-    const runs =
-      runJson<Array<Record<string, unknown>>>(
-        "gh",
-        [
-          "run",
-          "list",
-          "--repo",
-          repoConfig.repo,
-          "--branch",
-          branch,
-          "--limit",
-          String(DEFAULT_GH_RUN_LIMIT),
-          "--json",
-          "status,conclusion,workflowName,name,displayTitle,createdAt,startedAt,updatedAt,url",
-        ],
-        {
-          env: { GH_TOKEN: process.env.GH_TOKEN || process.env.GITHUB_TOKEN },
-        },
-      ) || [];
+  for (const policy of getWorkflowPoliciesForEnvironment(environment)) {
+    if (policy.monitorMode === "disabled") continue;
 
-    for (const workflow of repoConfig.workflows) {
-      // Walk past cancelled/superseded runs to find the latest meaningful result
-      const matchingRuns = runs.filter(
-        (r) => String(r.workflowName || r.name || "") === workflow,
-      );
-      let run = matchingRuns[0] || null;
-      let assessment = evaluateWorkflowRun(
-        run as any,
-        new Date(),
-        DEFAULT_STALE_MINUTES,
-      );
-      // If latest run was cancelled, walk back to find a terminal result
-      if (assessment.status === "cancelled" && matchingRuns.length > 1) {
-        for (let i = 1; i < matchingRuns.length; i++) {
-          const priorAssessment = evaluateWorkflowRun(
-            matchingRuns[i] as any,
-            new Date(),
-            DEFAULT_STALE_MINUTES,
-          );
-          if (priorAssessment.status !== "cancelled") {
-            run = matchingRuns[i];
-            assessment = priorAssessment;
-            assessment.message = `(Skipped ${i} cancelled run${i > 1 ? 's' : ''}) ${assessment.message}`;
-            break;
-          }
-        }
-      }
-      const record: WorkflowRecord = {
-        environment,
-        repo: repoConfig.repo,
-        workflow,
-        branch,
-        level: assessment.level,
-        status: assessment.status,
-        message: assessment.message,
-        ageMinutes: assessment.ageMinutes,
-        url: run ? String(run.url || "") : null,
-        updatedAt: run ? String(run.updatedAt || run.startedAt || run.createdAt || '') || null : null,
-      };
-      records.push(record);
-      if (assessment.level === "skip") continue; // Cancelled runs are non-actionable
-      pushIssue(
-        assessment.level === "blocker" ? blockers : warnings,
-        assessment.level,
-        {
+    if (policy.monitorMode === "existence-only") {
+      try {
+        const exists = await getWorkflowExists(policy);
+        const assessment = evaluateWorkflowExistence(exists, policy.severity);
+        const record: WorkflowRecord = {
+          environment,
+          repo: policy.repo,
+          workflow: policy.displayName,
+          branch: policy.branch,
+          level: assessment.level,
+          status: assessment.status,
+          message: assessment.message,
+          ageMinutes: assessment.ageMinutes,
+          url: null,
+          updatedAt: null,
+          workflowRef: String(policy.workflowRef),
+          monitorMode: policy.monitorMode,
+          severity: policy.severity,
+        };
+        records.push(record);
+        pushIssue(
+          assessment.level === "blocker" ? blockers : warnings,
+          assessment.level,
+          {
+            environment,
+            category: "workflow",
+            target: `${policy.repo} / ${policy.displayName}`,
+            message: assessment.message,
+          },
+        );
+      } catch (error) {
+        const level = levelForWorkflowSeverity(policy.severity);
+        const message = `Could not load workflow metadata via GitHub Actions API: ${errorMessage(error)}`;
+        records.push({
+          environment,
+          repo: policy.repo,
+          workflow: policy.displayName,
+          branch: policy.branch,
+          level,
+          status: "lookup-failed",
+          message,
+          ageMinutes: null,
+          url: null,
+          updatedAt: null,
+          workflowRef: String(policy.workflowRef),
+          monitorMode: policy.monitorMode,
+          severity: policy.severity,
+        });
+        pushIssue(level === "blocker" ? blockers : warnings, level, {
           environment,
           category: "workflow",
-          target: `${repoConfig.repo} / ${workflow}`,
-          message: assessment.message,
-        },
-      );
+          target: `${policy.repo} / ${policy.displayName}`,
+          message,
+        });
+      }
+      continue;
     }
+
+    let runs: WorkflowRunSummary[];
+    try {
+      runs = await listWorkflowRuns(policy);
+    } catch (error) {
+      const level = levelForWorkflowSeverity(policy.severity);
+      const message = `Could not load workflow runs via GitHub Actions API: ${errorMessage(error)}`;
+      records.push({
+        environment,
+        repo: policy.repo,
+        workflow: policy.displayName,
+        branch: policy.branch,
+        level,
+        status: "lookup-failed",
+        message,
+        ageMinutes: null,
+        url: null,
+        updatedAt: null,
+        workflowRef: String(policy.workflowRef),
+        monitorMode: policy.monitorMode,
+        severity: policy.severity,
+      });
+      pushIssue(level === "blocker" ? blockers : warnings, level, {
+        environment,
+        category: "workflow",
+        target: `${policy.repo} / ${policy.displayName}`,
+        message,
+      });
+      continue;
+    }
+
+    const { run, assessment } = selectLatestMeaningfulRun(
+      runs,
+      now,
+      DEFAULT_STALE_MINUTES,
+      policy.severity,
+    );
+    const record: WorkflowRecord = {
+      environment,
+      repo: policy.repo,
+      workflow: policy.displayName,
+      branch: policy.branch,
+      level: assessment.level,
+      status: assessment.status,
+      message: assessment.message,
+      ageMinutes: assessment.ageMinutes,
+      url: run?.url || null,
+      updatedAt: run?.updatedAt || run?.startedAt || run?.createdAt || null,
+      workflowRef: String(policy.workflowRef),
+      monitorMode: policy.monitorMode,
+      severity: policy.severity,
+    };
+    records.push(record);
+
+    pushIssue(
+      assessment.level === "blocker" ? blockers : warnings,
+      assessment.level,
+      {
+        environment,
+        category: "workflow",
+        target: `${policy.repo} / ${policy.displayName}`,
+        message: assessment.message,
+      },
+    );
   }
 
   return records;
@@ -299,7 +458,9 @@ function collectInstanceState(): Record<string, unknown> | null {
 
 function flattenInstances(payload: Record<string, unknown> | null): Array<Record<string, unknown>> {
   if (!payload) return [];
-  const reservations = Array.isArray((payload as any).Reservations) ? (payload as any).Reservations : [];
+  const reservations = Array.isArray((payload as any).Reservations)
+    ? (payload as any).Reservations
+    : [];
   return reservations.flatMap((reservation: any) =>
     Array.isArray(reservation.Instances) ? reservation.Instances : [],
   );
@@ -407,15 +568,14 @@ async function collectInfrastructureRecords(
   return records;
 }
 
-function listEnvironmentSecrets(repo: string, environment: MonitorEnvironment): { exists: boolean; names: string[] } {
-  const response = runCommand(
-    "gh",
-    ["api", `repos/${repo}/environments/${environment}/secrets`],
-    {
-      allowFailure: true,
-      env: { GH_TOKEN: process.env.GH_TOKEN || process.env.GITHUB_TOKEN },
-    },
-  );
+function listEnvironmentSecrets(
+  repo: string,
+  environment: MonitorEnvironment,
+): { exists: boolean; names: string[] } {
+  const response = runCommand("gh", ["api", `repos/${repo}/environments/${environment}/secrets`], {
+    allowFailure: true,
+    env: githubEnv(),
+  });
 
   if (!response) {
     return { exists: false, names: [] };
@@ -424,19 +584,17 @@ function listEnvironmentSecrets(repo: string, environment: MonitorEnvironment): 
   const payload = JSON.parse(response) as { secrets?: Array<{ name: string }> };
   return {
     exists: true,
-    names: Array.isArray(payload.secrets) ? payload.secrets.map((secret) => secret.name) : [],
+    names: Array.isArray(payload.secrets)
+      ? payload.secrets.map((secret) => secret.name)
+      : [],
   };
 }
 
 function listRepoSecrets(repo: string): string[] {
   const payload =
-    runJson<{ secrets?: Array<{ name: string }> }>(
-      "gh",
-      ["api", `repos/${repo}/actions/secrets`],
-      {
-        env: { GH_TOKEN: process.env.GH_TOKEN || process.env.GITHUB_TOKEN },
-      },
-    ) || {};
+    runJson<{ secrets?: Array<{ name: string }> }>("gh", ["api", `repos/${repo}/actions/secrets`], {
+      env: githubEnv(),
+    }) || {};
 
   return Array.isArray(payload.secrets) ? payload.secrets.map((secret) => secret.name) : [];
 }
@@ -638,7 +796,12 @@ async function collectSecretRecords(
         ghFingerprint: fingerprintSecretValue(runtimeGhSecret),
       },
     });
-    blockers.push({ environment, category: "secrets", target: "ATM EC2 runtime deploy secrets", message });
+    blockers.push({
+      environment,
+      category: "secrets",
+      target: "ATM EC2 runtime deploy secrets",
+      message,
+    });
   }
 
   return records;
@@ -682,7 +845,7 @@ function renderSummary(report: MonitorReport): string {
     lines.push("|----------|------|--------|------------|---------|");
     for (const row of workflowRows) {
       lines.push(
-        `| ${row.workflow} | ${row.repo} | ${row.status} | ${row.updatedAt || '-'} | ${row.message} |`,
+        `| ${row.workflow} | ${row.repo} | ${row.status} | ${row.updatedAt || "-"} | ${row.message} |`,
       );
     }
 
@@ -708,27 +871,31 @@ function renderSummary(report: MonitorReport): string {
   return lines.join("\n");
 }
 
-async function buildReport(environment: MonitorEnvironmentInput): Promise<MonitorReport> {
+export async function buildReport(
+  environment: MonitorEnvironmentInput,
+  deps: MonitorDependencies = {},
+): Promise<MonitorReport> {
   const blockers: IssueRecord[] = [];
   const warnings: IssueRecord[] = [];
   const workflows: WorkflowRecord[] = [];
   const infrastructure: InfrastructureRecord[] = [];
   const secrets: SecretRecord[] = [];
 
+  const infrastructureCollector = deps.collectInfrastructureRecords ?? collectInfrastructureRecords;
+  const secretCollector = deps.collectSecretRecords ?? collectSecretRecords;
+
   for (const targetEnvironment of environmentList(environment)) {
     workflows.push(
-      ...(await collectWorkflowRecords(targetEnvironment, blockers, warnings)),
+      ...(await collectWorkflowRecords(targetEnvironment, blockers, warnings, deps)),
     );
     infrastructure.push(
-      ...(await collectInfrastructureRecords(targetEnvironment, blockers, warnings)),
+      ...(await infrastructureCollector(targetEnvironment, blockers, warnings)),
     );
-    secrets.push(
-      ...(await collectSecretRecords(targetEnvironment, blockers, warnings)),
-    );
+    secrets.push(...(await secretCollector(targetEnvironment, blockers, warnings)));
   }
 
   return {
-    checkedAt: new Date().toISOString(),
+    checkedAt: (deps.now ?? new Date()).toISOString(),
     environment,
     overallStatus: mergeLevels([
       ...workflows.map((entry) => entry.level),
@@ -767,7 +934,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`[monitor-cicd] ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(`[monitor-cicd] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  });
+}

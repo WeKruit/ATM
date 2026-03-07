@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 
 export type MonitorEnvironment = "staging" | "production";
 export type IssueLevel = "ok" | "warning" | "blocker" | "skip";
+export type WorkflowMonitorMode = "latest-run" | "existence-only" | "disabled";
+export type WorkflowSeverity = "blocker" | "warning";
 
 export interface WorkflowRunSummary {
   workflowName?: string;
+  displayTitle?: string;
   status?: string;
   conclusion?: string | null;
   createdAt?: string;
@@ -13,9 +16,19 @@ export interface WorkflowRunSummary {
   url?: string;
 }
 
+export interface WorkflowPolicy {
+  repo: string;
+  workflowRef: string | number;
+  displayName: string;
+  environments: MonitorEnvironment[];
+  branch: string;
+  monitorMode: WorkflowMonitorMode;
+  severity: WorkflowSeverity;
+}
+
 export interface WorkflowAssessment {
   level: IssueLevel;
-  status: "healthy" | "running" | "stale" | "failed" | "unknown";
+  status: "healthy" | "running" | "stale" | "failed" | "unknown" | "cancelled" | "configured";
   message: string;
   ageMinutes: number | null;
 }
@@ -42,32 +55,155 @@ export interface FingerprintAssessment {
   message: string;
 }
 
-export interface RepoWorkflowConfig {
-  repo: string;
-  workflows: string[];
-}
-
 export interface SecretScopeRule {
   repo: string;
   requiredEnvSecrets: string[];
 }
 
-export const WORKFLOW_CONFIG: RepoWorkflowConfig[] = [
+export const WORKFLOW_POLICIES: WorkflowPolicy[] = [
   {
     repo: "WeKruit/ATM",
-    workflows: ["CI — ATM", "CD → ATM API (EC2)", "CD → ATM Dashboard (Fly.io)", "Integration Tests"],
+    workflowRef: "ci-atm.yml",
+    displayName: "CI — ATM",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/ATM",
+    workflowRef: "integration-test.yml",
+    displayName: "Integration Tests",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/ATM",
+    workflowRef: "ci-atm.yml",
+    displayName: "CI — ATM",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/ATM",
+    workflowRef: "cd-atm-api.yml",
+    displayName: "CD → ATM API (EC2)",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "blocker",
+  },
+  {
+    repo: "WeKruit/ATM",
+    workflowRef: "cd-atm-dashboard.yml",
+    displayName: "CD → ATM Dashboard (Fly.io)",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "blocker",
   },
   {
     repo: "WeKruit/VALET",
-    workflows: ["CI", "CD → Staging", "CD → Production", "Integration Tests"],
+    workflowRef: "ci.yml",
+    displayName: "CI",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/VALET",
+    workflowRef: "cd-staging.yml",
+    displayName: "CD → Staging",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "blocker",
+  },
+  {
+    repo: "WeKruit/VALET",
+    workflowRef: "ci-integration.yml",
+    displayName: "Integration Tests",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/VALET",
+    workflowRef: "ci.yml",
+    displayName: "CI",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/VALET",
+    workflowRef: "cd-prod.yml",
+    displayName: "CD → Production",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "blocker",
+  },
+  {
+    repo: "WeKruit/VALET",
+    workflowRef: "ci-integration.yml",
+    displayName: "Integration Tests",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "warning",
   },
   {
     repo: "WeKruit/GH-Desktop-App",
-    workflows: ["CI/CD"],
+    workflowRef: "ci.yml",
+    displayName: "CI/CD",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "warning",
   },
   {
     repo: "WeKruit/GHOST-HANDS",
-    workflows: ["CI/CD", "Publish Engine", "Rollback"],
+    workflowRef: "ci.yml",
+    displayName: "CI/CD",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/GHOST-HANDS",
+    workflowRef: "publish-engine.yml",
+    displayName: "Publish Engine",
+    environments: ["staging"],
+    branch: "staging",
+    monitorMode: "latest-run",
+    severity: "blocker",
+  },
+  {
+    repo: "WeKruit/GHOST-HANDS",
+    workflowRef: "rollback.yml",
+    displayName: "Rollback",
+    environments: ["staging", "production"],
+    branch: "main",
+    monitorMode: "existence-only",
+    severity: "warning",
+  },
+  {
+    repo: "WeKruit/GHOST-HANDS",
+    workflowRef: "ci.yml",
+    displayName: "CI/CD",
+    environments: ["production"],
+    branch: "main",
+    monitorMode: "latest-run",
+    severity: "warning",
   },
 ];
 
@@ -102,12 +238,55 @@ const FAILED_CONCLUSIONS = new Set([
   "stale",
   "action_required",
 ]);
-
-/** Cancelled runs are non-actionable (superseded by newer pushes). Skip them. */
 const SKIPPABLE_CONCLUSIONS = new Set(["cancelled"]);
+
+function levelForSeverity(severity: WorkflowSeverity): IssueLevel {
+  return severity === "blocker" ? "blocker" : "warning";
+}
 
 export function environmentToBranch(environment: MonitorEnvironment): string {
   return environment === "staging" ? "staging" : "main";
+}
+
+export function getWorkflowPoliciesForEnvironment(
+  environment: MonitorEnvironment,
+): WorkflowPolicy[] {
+  return WORKFLOW_POLICIES.filter(
+    (policy) =>
+      policy.monitorMode !== "disabled" && policy.environments.includes(environment),
+  );
+}
+
+export function findWorkflowPolicy(params: {
+  repo: string;
+  workflowRef?: string | number;
+  displayName?: string;
+  environment: MonitorEnvironment;
+}): WorkflowPolicy | undefined {
+  return getWorkflowPoliciesForEnvironment(params.environment).find((policy) => {
+    if (policy.repo !== params.repo) return false;
+    if (params.workflowRef !== undefined) {
+      return String(policy.workflowRef) === String(params.workflowRef);
+    }
+    if (params.displayName !== undefined) {
+      return policy.displayName === params.displayName;
+    }
+    return false;
+  });
+}
+
+export function buildWorkflowRunsApiPath(
+  policy: WorkflowPolicy,
+  perPage = 20,
+): string {
+  const workflowRef = encodeURIComponent(String(policy.workflowRef));
+  const branch = encodeURIComponent(policy.branch);
+  return `repos/${policy.repo}/actions/workflows/${workflowRef}/runs?branch=${branch}&per_page=${perPage}`;
+}
+
+export function buildWorkflowMetadataApiPath(policy: WorkflowPolicy): string {
+  const workflowRef = encodeURIComponent(String(policy.workflowRef));
+  return `repos/${policy.repo}/actions/workflows/${workflowRef}`;
 }
 
 export function fingerprintSecretValue(value?: string | null): string | null {
@@ -123,6 +302,7 @@ export function evaluateWorkflowRun(
   run: WorkflowRunSummary | null | undefined,
   now = new Date(),
   staleMinutes = 20,
+  severity: WorkflowSeverity = "blocker",
 ): WorkflowAssessment {
   if (!run) {
     return {
@@ -154,14 +334,14 @@ export function evaluateWorkflowRun(
       return {
         level: "skip",
         status: "cancelled",
-        message: `Latest run was cancelled (superseded). Check prior runs for real status.`,
+        message: "Latest run was cancelled (superseded). Check prior runs for real status.",
         ageMinutes,
       };
     }
 
     if (FAILED_CONCLUSIONS.has(conclusion)) {
       return {
-        level: "blocker",
+        level: levelForSeverity(severity),
         status: "failed",
         message: `Latest run completed with ${conclusion}.`,
         ageMinutes,
@@ -179,7 +359,7 @@ export function evaluateWorkflowRun(
   if (RUNNING_STATUSES.has(status)) {
     if (ageMinutes !== null && ageMinutes > staleMinutes) {
       return {
-        level: "blocker",
+        level: levelForSeverity(severity),
         status: "stale",
         message: `Latest run is still ${status} after ${ageMinutes} minutes.`,
         ageMinutes,
@@ -199,6 +379,82 @@ export function evaluateWorkflowRun(
     status: "unknown",
     message: `Latest run returned unexpected status "${status || "unknown"}".`,
     ageMinutes,
+  };
+}
+
+export function evaluateWorkflowExistence(
+  exists: boolean,
+  severity: WorkflowSeverity = "warning",
+): WorkflowAssessment {
+  if (exists) {
+    return {
+      level: "ok",
+      status: "configured",
+      message: "Workflow is configured; no recent run is required.",
+      ageMinutes: null,
+    };
+  }
+
+  return {
+    level: levelForSeverity(severity),
+    status: "unknown",
+    message: "Workflow is not available via the GitHub Actions workflow API.",
+    ageMinutes: null,
+  };
+}
+
+export function selectLatestMeaningfulRun(
+  runs: WorkflowRunSummary[],
+  now = new Date(),
+  staleMinutes = 20,
+  severity: WorkflowSeverity = "blocker",
+): {
+  run: WorkflowRunSummary | null;
+  assessment: WorkflowAssessment;
+  skippedCancelledCount: number;
+} {
+  if (runs.length === 0) {
+    return {
+      run: null,
+      assessment: evaluateWorkflowRun(null, now, staleMinutes, severity),
+      skippedCancelledCount: 0,
+    };
+  }
+
+  let skippedCancelledCount = 0;
+  let firstCancelledRun: WorkflowRunSummary | null = null;
+  let firstCancelledAssessment: WorkflowAssessment | null = null;
+  for (const run of runs) {
+    const assessment = evaluateWorkflowRun(run, now, staleMinutes, severity);
+    if (assessment.status === "cancelled") {
+      skippedCancelledCount += 1;
+      if (!firstCancelledRun) {
+        firstCancelledRun = run;
+        firstCancelledAssessment = assessment;
+      }
+      continue;
+    }
+
+    return {
+      run,
+      assessment:
+        skippedCancelledCount === 0
+          ? assessment
+          : {
+              ...assessment,
+              message: `(Skipped ${skippedCancelledCount} cancelled run${
+                skippedCancelledCount > 1 ? "s" : ""
+              }) ${assessment.message}`,
+            },
+      skippedCancelledCount,
+    };
+  }
+
+  return {
+    run: firstCancelledRun,
+    assessment:
+      firstCancelledAssessment ?? evaluateWorkflowRun(firstCancelledRun, now, staleMinutes, severity),
+    skippedCancelledCount,
   };
 }
 
