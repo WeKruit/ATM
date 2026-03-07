@@ -7,10 +7,11 @@ import FleetPage from './pages/FleetPage';
 import MetricsPage from './pages/MetricsPage';
 import SecretsPage from './pages/SecretsPage';
 import KamalPage from './pages/KamalPage';
+import DesktopReleasesPage from './pages/DesktopReleasesPage';
 
-type Tab = 'fleet' | 'overview' | 'deploys' | 'containers' | 'metrics' | 'secrets' | 'kamal';
+type Tab = 'fleet' | 'overview' | 'deploys' | 'containers' | 'metrics' | 'desktop' | 'secrets' | 'kamal';
 
-const ALL_TABS: Tab[] = ['fleet', 'overview', 'deploys', 'containers', 'metrics', 'secrets', 'kamal'];
+const ALL_TABS: Tab[] = ['fleet', 'overview', 'deploys', 'containers', 'metrics', 'desktop', 'secrets', 'kamal'];
 const isValidTab = (t: string): t is Tab => ALL_TABS.includes(t as Tab);
 
 /** Tabs scoped to a specific machine */
@@ -23,6 +24,7 @@ const machineTabs: { id: Tab; label: string }[] = [
 
 /** Global tabs (not scoped to a machine) */
 const globalTabs: { id: Tab; label: string }[] = [
+  { id: 'desktop', label: 'Desktop' },
   { id: 'secrets', label: 'Secrets' },
   { id: 'kamal', label: 'Kamal' },
 ];
@@ -118,6 +120,7 @@ function AppContent() {
     deploys: <DeploysPage />,
     containers: <FleetPage />,
     metrics: <MetricsPage />,
+    desktop: <DesktopReleasesPage />,
     secrets: <SecretsPage />,
     kamal: <KamalPage />,
   };

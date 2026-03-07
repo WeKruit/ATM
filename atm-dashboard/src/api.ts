@@ -172,3 +172,35 @@ export interface IdleStatusResponse {
   config: { idleTimeoutMs: number; minRunning: number; pollIntervalMs: number };
   workers: IdleStatusWorker[];
 }
+
+// ── Desktop release types ───────────────────────────────────────
+
+export interface DesktopReleaseSummary {
+  id: string;
+  version: string;
+  channel: "stable" | "beta";
+  releaseUrl: string;
+  repository: string;
+  commitSha: string | null;
+  commitMessage: string | null;
+  publishedAt: string;
+  blocked: boolean;
+  assets: Record<string, string>;
+}
+
+export interface DesktopRolloutSummary {
+  channel: "stable" | "beta";
+  baselineReleaseId: string | null;
+  candidateReleaseId: string | null;
+  rolloutPercent: number;
+  minimumSupportedVersion: string | null;
+  status: "idle" | "active" | "paused";
+  updatedAt: string;
+  baselineVersion: string | null;
+  candidateVersion: string | null;
+}
+
+export interface DesktopReleasesResponse {
+  releases: DesktopReleaseSummary[];
+  rollouts: DesktopRolloutSummary[];
+}

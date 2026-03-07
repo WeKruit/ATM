@@ -89,6 +89,23 @@ import * as idleMonitor from './ec2-idle-monitor';
 import { startInstance, stopInstance, describeInstance } from './ec2-client';
 import { enterStandby, exitStandby } from './asg-client';
 import path from 'node:path';
+import {
+  activateDesktopRelease,
+  getDesktopRollouts,
+  getFeedMetadata,
+  getLatestPublicRelease,
+  initDesktopReleaseStore,
+  listDesktopReleases,
+  pauseDesktopRollout,
+  resolveFeedAssetRedirect,
+  rollbackDesktopRollout,
+  setDesktopRolloutPercent,
+  setMinimumSupportedVersion,
+  upsertDesktopRelease,
+  type DesktopReleaseArch,
+  type DesktopReleaseChannel,
+  type DesktopReleasePlatform,
+} from './desktop-releases';
 
 // ── AWS Secrets Manager ──────────────────────────────────────────────
 
@@ -156,6 +173,10 @@ const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000
 
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
+const desktopReleaseWebhookSecret =
+  process.env.ATM_DESKTOP_RELEASE_WEBHOOK_SECRET
+  || process.env.VALET_DEPLOY_WEBHOOK_SECRET
+  || '';
 
 // ── Fleet Config ────────────────────────────────────────────────────
 
@@ -322,6 +343,21 @@ function verifySecret(req: Request): boolean {
   }
 }
 
+function verifyDesktopReleaseSignature(rawBody: string, req: Request): boolean {
+  const header = req.headers.get('x-desktop-release-signature');
+  if (!header || !desktopReleaseWebhookSecret) return false;
+  const provided = header.replace(/^sha256=/, '');
+  const expected = crypto
+    .createHmac('sha256', desktopReleaseWebhookSecret)
+    .update(rawBody)
+    .digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
 async function fetchJson(url: string, timeoutMs = 5000): Promise<Record<string, unknown> | null> {
   try {
     const resp = await fetch(url, {
@@ -329,6 +365,34 @@ async function fetchJson(url: string, timeoutMs = 5000): Promise<Record<string, 
     });
     if (!resp.ok) return null;
     return (await resp.json()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function getActor(req: Request): string {
+  return (
+    req.headers.get('x-operator-id')
+    || req.headers.get('x-operator-email')
+    || 'operator'
+  );
+}
+
+function parseDesktopReleaseChannel(value: string | null): DesktopReleaseChannel | null {
+  return value === 'stable' || value === 'beta' ? value : null;
+}
+
+function parseDesktopReleasePlatform(value: string | null): DesktopReleasePlatform | null {
+  return value === 'darwin' || value === 'win32' ? value : null;
+}
+
+function parseDesktopReleaseArch(value: string | null): DesktopReleaseArch | null {
+  return value === 'arm64' || value === 'x64' ? value : null;
+}
+
+async function parseJsonBody<T>(req: Request): Promise<T | null> {
+  try {
+    return (await req.json()) as T;
   } catch {
     return null;
   }
@@ -611,6 +675,7 @@ function parseKamalHosts(yamlContent: string): Record<string, string[]> {
 }
 
 if (typeof Bun !== 'undefined') {
+  initDesktopReleaseStore();
   Bun.serve({
     hostname: process.env.GH_DEPLOY_HOSTNAME || '0.0.0.0',
     port: DEPLOY_PORT,
@@ -834,6 +899,315 @@ async function handleRequest(req: Request): Promise<Response> {
         const record = getRecord(id);
         if (!record) return Response.json({ error: 'Deploy record not found' }, { status: 404 });
         return Response.json(record);
+      }
+
+      // ── GET /desktop/releases — Desktop release history + rollout state ─────
+      if (url.pathname === '/desktop/releases' && req.method === 'GET') {
+        const channel = parseDesktopReleaseChannel(url.searchParams.get('channel'));
+        return Response.json({
+          releases: listDesktopReleases(channel ?? undefined),
+          rollouts: getDesktopRollouts(),
+        });
+      }
+
+      // ── GET /desktop/releases/latest — Current public baseline release ───────
+      if (url.pathname === '/desktop/releases/latest' && req.method === 'GET') {
+        const channel = parseDesktopReleaseChannel(url.searchParams.get('channel')) ?? 'stable';
+        const release = getLatestPublicRelease(channel);
+        if (!release) {
+          return Response.json(
+            { error: `No ${channel} desktop release available` },
+            { status: 404 },
+          );
+        }
+        return Response.json(release);
+      }
+
+      // ── POST /desktop/releases/webhook — CI release ingest ───────────────────
+      if (url.pathname === '/desktop/releases/webhook' && req.method === 'POST') {
+        if (!desktopReleaseWebhookSecret) {
+          return Response.json(
+            { error: 'ATM_DESKTOP_RELEASE_WEBHOOK_SECRET is not configured' },
+            { status: 503 },
+          );
+        }
+
+        const rawBody = await req.text();
+        if (!verifyDesktopReleaseSignature(rawBody, req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Desktop-Release-Signature' },
+            { status: 401 },
+          );
+        }
+
+        let body:
+          | {
+              version?: string;
+              channel?: DesktopReleaseChannel;
+              releaseUrl?: string;
+              repository?: string;
+              commitSha?: string | null;
+              commitMessage?: string | null;
+              publishedAt?: string;
+              runId?: string | null;
+              runUrl?: string | null;
+              assets?: Array<{ kind?: string; url?: string }>;
+              metadata?: Array<{ kind?: string; content?: string }>;
+            }
+          | null = null;
+
+        try {
+          body = JSON.parse(rawBody);
+        } catch {
+          return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+        }
+
+        if (
+          !body
+          || !body.version
+          || !body.channel
+          || !body.releaseUrl
+          || !body.repository
+          || !body.publishedAt
+          || !Array.isArray(body.assets)
+          || !Array.isArray(body.metadata)
+        ) {
+          return Response.json({ error: 'Missing required release fields' }, { status: 400 });
+        }
+
+        try {
+          const release = upsertDesktopRelease({
+            version: body.version,
+            channel: body.channel,
+            releaseUrl: body.releaseUrl,
+            repository: body.repository,
+            commitSha: body.commitSha ?? null,
+            commitMessage: body.commitMessage ?? null,
+            publishedAt: body.publishedAt,
+            runId: body.runId ?? null,
+            runUrl: body.runUrl ?? null,
+            assets: body.assets.map((asset) => ({
+              kind: asset.kind as
+                | 'dmg_arm64'
+                | 'dmg_x64'
+                | 'exe_x64'
+                | 'exe_blockmap_x64'
+                | 'zip_darwin_arm64'
+                | 'zip_darwin_x64',
+              url: asset.url as string,
+            })),
+            metadata: body.metadata.map((metadata) => ({
+              kind: metadata.kind as 'latest_win32_x64' | 'latest_darwin_x64' | 'latest_darwin_arm64',
+              content: metadata.content as string,
+            })),
+          });
+
+          return Response.json({ success: true, release }, { status: 201 });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return Response.json({ error: message }, { status: 400 });
+        }
+      }
+
+      // ── GET /desktop/feeds/:channel/:platform/:arch/latest*.yml ─────────────
+      if (
+        url.pathname.match(/^\/desktop\/feeds\/(stable|beta)\/(darwin|win32)\/(arm64|x64)\/latest(?:-mac(?:-arm64)?)?\.yml$/)
+        && req.method === 'GET'
+      ) {
+        const parts = url.pathname.split('/');
+        const channel = parseDesktopReleaseChannel(parts[3] ?? null);
+        const platform = parseDesktopReleasePlatform(parts[4] ?? null);
+        const arch = parseDesktopReleaseArch(parts[5] ?? null);
+        const installationId = url.searchParams.get('installationId');
+        const currentVersion = url.searchParams.get('currentVersion');
+
+        if (!channel || !platform || !arch || !installationId) {
+          return Response.json(
+            { error: 'channel, platform, arch, and installationId are required' },
+            { status: 400 },
+          );
+        }
+
+        const metadata = getFeedMetadata({
+          channel,
+          platform,
+          arch,
+          installationId,
+          currentVersion,
+        });
+
+        if (!metadata) {
+          return new Response(null, { status: 204 });
+        }
+
+        const headers = new Headers({
+          'Content-Type': 'text/yaml; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Desktop-Release-Version': metadata.release.version,
+        });
+        if (metadata.minimumSupportedVersion) {
+          headers.set('X-Desktop-Minimum-Supported-Version', metadata.minimumSupportedVersion);
+        }
+
+        return new Response(metadata.content, {
+          status: 200,
+          headers,
+        });
+      }
+
+      // ── GET /desktop/feeds/:channel/:platform/:arch/:filename — asset redirect
+      if (
+        url.pathname.match(/^\/desktop\/feeds\/(stable|beta)\/(darwin|win32)\/(arm64|x64)\/[^/]+$/)
+        && req.method === 'GET'
+      ) {
+        const parts = url.pathname.split('/');
+        const channel = parseDesktopReleaseChannel(parts[3] ?? null);
+        const platform = parseDesktopReleasePlatform(parts[4] ?? null);
+        const arch = parseDesktopReleaseArch(parts[5] ?? null);
+        const filename = parts[6] ?? '';
+
+        if (filename.startsWith('latest')) {
+          return Response.json({ error: 'Invalid feed asset path' }, { status: 400 });
+        }
+
+        const installationId = url.searchParams.get('installationId');
+        const currentVersion = url.searchParams.get('currentVersion');
+        if (!channel || !platform || !arch || !installationId) {
+          return Response.json(
+            { error: 'channel, platform, arch, and installationId are required' },
+            { status: 400 },
+          );
+        }
+
+        const redirect = resolveFeedAssetRedirect({
+          channel,
+          platform,
+          arch,
+          installationId,
+          currentVersion,
+          filename,
+        });
+
+        if (!redirect) {
+          return Response.json({ error: 'No asset available for this client' }, { status: 404 });
+        }
+
+        return new Response(null, {
+          status: 302,
+          headers: {
+            Location: redirect.url,
+            'Cache-Control': 'no-store',
+            'X-Desktop-Release-Version': redirect.release.version,
+          },
+        });
+      }
+
+      // ── POST /desktop/releases/:id/activate — stage release rollout ──────────
+      if (url.pathname.match(/^\/desktop\/releases\/[^/]+\/activate$/) && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const releaseId = url.pathname.split('/')[3] ?? '';
+        try {
+          const rollout = activateDesktopRelease(releaseId, getActor(req));
+          return Response.json({ rollout });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return Response.json({ error: message }, { status: 400 });
+        }
+      }
+
+      // ── POST /desktop/releases/:id/rollout — update rollout percentage ───────
+      if (url.pathname.match(/^\/desktop\/releases\/[^/]+\/rollout$/) && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const releaseId = url.pathname.split('/')[3] ?? '';
+        const body = await parseJsonBody<{ rolloutPercent?: number }>(req);
+        if (!body || typeof body.rolloutPercent !== 'number') {
+          return Response.json({ error: 'rolloutPercent is required' }, { status: 400 });
+        }
+        try {
+          const rollout = setDesktopRolloutPercent(releaseId, body.rolloutPercent, getActor(req));
+          return Response.json({ rollout });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return Response.json({ error: message }, { status: 400 });
+        }
+      }
+
+      // ── POST /desktop/releases/:id/pause — pause a staged rollout ────────────
+      if (url.pathname.match(/^\/desktop\/releases\/[^/]+\/pause$/) && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const releaseId = url.pathname.split('/')[3] ?? '';
+        try {
+          const rollout = pauseDesktopRollout(releaseId, getActor(req));
+          return Response.json({ rollout });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return Response.json({ error: message }, { status: 400 });
+        }
+      }
+
+      // ── POST /desktop/releases/:id/rollback — rollback a release ─────────────
+      if (url.pathname.match(/^\/desktop\/releases\/[^/]+\/rollback$/) && req.method === 'POST') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const releaseId = url.pathname.split('/')[3] ?? '';
+        try {
+          const rollout = rollbackDesktopRollout(releaseId, getActor(req));
+          return Response.json({ rollout });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return Response.json({ error: message }, { status: 400 });
+        }
+      }
+
+      // ── POST /desktop/rollouts/:channel/minimum-supported — version floor ────
+      if (
+        url.pathname.match(/^\/desktop\/rollouts\/(stable|beta)\/minimum-supported$/)
+        && req.method === 'POST'
+      ) {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
+        const channel = parseDesktopReleaseChannel(url.pathname.split('/')[3] ?? null);
+        const body = await parseJsonBody<{ minimumSupportedVersion?: string | null }>(req);
+        if (!channel || !body || !('minimumSupportedVersion' in body)) {
+          return Response.json(
+            { error: 'minimumSupportedVersion is required' },
+            { status: 400 },
+          );
+        }
+        try {
+          const rollout = setMinimumSupportedVersion(
+            channel,
+            body.minimumSupportedVersion ?? null,
+            getActor(req),
+          );
+          return Response.json({ rollout });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return Response.json({ error: message }, { status: 400 });
+        }
       }
 
       // ── GET /fleet — Dynamic fleet registry ──────────────────
