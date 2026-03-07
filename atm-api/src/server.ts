@@ -43,7 +43,8 @@
  *   GET  /fleet/:id/metrics    — Proxied fleet system metrics (no auth)
  *   GET  /fleet/:id/workers    — Proxied worker metadata (requires X-Deploy-Secret)
  *   GET  /fleet/:id/*          — Smart proxy fallback (requires X-Deploy-Secret)
- *   GET  /internal/llm-proxy-config — Internal runtime LLM proxy config (requires service bearer token)
+ *   GET  /internal/llm-runtime-profiles/:profileKey — Internal runtime LLM profile (requires service bearer token)
+ *   GET  /internal/llm-proxy-config — Legacy internal runtime LLM proxy config (requires service bearer token)
  *   GET  /dashboard            — Serve dashboard SPA (no auth)
  *   GET  /dashboard/*          — Serve dashboard SPA assets (no auth)
  *
@@ -97,7 +98,11 @@ import { deployStream } from './deploy-stream';
 import * as idleMonitor from './ec2-idle-monitor';
 import { startInstance, stopInstance, describeInstance, discoverGhInstancesByAsgTag } from './ec2-client';
 import { enterStandby, exitStandby } from './asg-client';
-import { getAnthropicProxyConfig, verifyLlmProxyServiceToken } from './llm-proxy-config';
+import {
+  getAnthropicProxyConfig,
+  getManagedLlmRuntimeProfile,
+  verifyLlmProxyServiceToken,
+} from './llm-proxy-config';
 import path from 'node:path';
 import {
   resolveDeploySecret,
@@ -865,7 +870,26 @@ if (typeof Bun !== 'undefined') {
 async function handleRequest(req: Request): Promise<Response> {
       const url = new URL(req.url);
 
-      // ── GET /internal/llm-proxy-config — Internal runtime config ──
+      // ── GET /internal/llm-runtime-profiles/:profileKey — Internal runtime config ──
+      if (url.pathname.startsWith('/internal/llm-runtime-profiles/') && req.method === 'GET') {
+        if (!verifyLlmProxyServiceToken(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing service bearer token' },
+            { status: 401 },
+          );
+        }
+
+        const profileKey = decodeURIComponent(url.pathname.slice('/internal/llm-runtime-profiles/'.length));
+        try {
+          return Response.json(getManagedLlmRuntimeProfile(profileKey));
+        } catch (error: any) {
+          const message = error?.message ?? 'LLM runtime profile is unavailable';
+          const status = message.includes('Unsupported runtime profile') ? 400 : 503;
+          return Response.json({ error: message }, { status });
+        }
+      }
+
+      // ── GET /internal/llm-proxy-config — Legacy internal runtime config ──
       if (url.pathname === '/internal/llm-proxy-config' && req.method === 'GET') {
         if (!verifyLlmProxyServiceToken(req)) {
           return Response.json(
