@@ -179,6 +179,7 @@ const desktopReleaseDeliveries = new Map<string, number>();
 const DESKTOP_FEED_RATE_LIMIT_WINDOW_MS = 60_000;
 const DESKTOP_FEED_RATE_LIMIT_MAX_REQUESTS = 120;
 const desktopFeedRateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+let desktopFeedRateLimitLastSweepAt = 0;
 
 // ── Fleet Config ────────────────────────────────────────────────────
 
@@ -408,6 +409,14 @@ function getDesktopFeedClientKey(req: Request): string {
 function checkDesktopFeedRateLimit(req: Request): Response | null {
   const key = getDesktopFeedClientKey(req);
   const nowMs = Date.now();
+  if (nowMs - desktopFeedRateLimitLastSweepAt >= DESKTOP_FEED_RATE_LIMIT_WINDOW_MS) {
+    for (const [bucketKey, bucket] of desktopFeedRateLimitBuckets.entries()) {
+      if (nowMs >= bucket.resetAt) {
+        desktopFeedRateLimitBuckets.delete(bucketKey);
+      }
+    }
+    desktopFeedRateLimitLastSweepAt = nowMs;
+  }
   const current = desktopFeedRateLimitBuckets.get(key);
   if (!current || nowMs >= current.resetAt) {
     desktopFeedRateLimitBuckets.set(key, {
