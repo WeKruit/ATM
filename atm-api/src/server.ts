@@ -173,10 +173,12 @@ const EC2_POLL_INTERVAL_MS = parseInt(process.env.EC2_POLL_INTERVAL_MS || '60000
 
 const startedAt = Date.now();
 let currentDeploy: { imageTag: string; startedAt: number; step: string } | null = null;
-const desktopReleaseWebhookSecret =
-  process.env.ATM_DESKTOP_RELEASE_WEBHOOK_SECRET
-  || process.env.VALET_DEPLOY_WEBHOOK_SECRET
-  || '';
+const desktopReleaseWebhookSecret = process.env.ATM_DESKTOP_RELEASE_WEBHOOK_SECRET || '';
+const DESKTOP_RELEASE_WEBHOOK_TOLERANCE_SECONDS = 300;
+const desktopReleaseDeliveries = new Map<string, number>();
+const DESKTOP_FEED_RATE_LIMIT_WINDOW_MS = 60_000;
+const DESKTOP_FEED_RATE_LIMIT_MAX_REQUESTS = 120;
+const desktopFeedRateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
 
 // ── Fleet Config ────────────────────────────────────────────────────
 
@@ -345,17 +347,90 @@ function verifySecret(req: Request): boolean {
 
 function verifyDesktopReleaseSignature(rawBody: string, req: Request): boolean {
   const header = req.headers.get('x-desktop-release-signature');
-  if (!header || !desktopReleaseWebhookSecret) return false;
+  const timestampHeader = req.headers.get('x-desktop-release-timestamp');
+  const deliveryId = req.headers.get('x-desktop-release-delivery');
+  if (!header || !desktopReleaseWebhookSecret || !timestampHeader || !deliveryId) return false;
+
+  const timestamp = Number.parseInt(timestampHeader, 10);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(timestamp)) return false;
+  if (Math.abs(nowSeconds - timestamp) > DESKTOP_RELEASE_WEBHOOK_TOLERANCE_SECONDS) return false;
+
+  for (const [key, seenAt] of desktopReleaseDeliveries.entries()) {
+    if (nowSeconds - seenAt > DESKTOP_RELEASE_WEBHOOK_TOLERANCE_SECONDS) {
+      desktopReleaseDeliveries.delete(key);
+    }
+  }
+  if (desktopReleaseDeliveries.has(deliveryId)) return false;
+
   const provided = header.replace(/^sha256=/, '');
   const expected = crypto
     .createHmac('sha256', desktopReleaseWebhookSecret)
-    .update(rawBody)
+    .update(`${timestamp}.${rawBody}`)
     .digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+    const valid = crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+    if (valid) {
+      desktopReleaseDeliveries.set(deliveryId, nowSeconds);
+    }
+    return valid;
   } catch {
     return false;
   }
+}
+
+function readDesktopFeedContext(req: Request, url: URL): {
+  installationId: string | null;
+  currentVersion: string | null;
+} {
+  const installationId =
+    req.headers.get('x-desktop-installation-id')?.trim()
+    || url.searchParams.get('installationId')?.trim()
+    || null;
+  const currentVersion =
+    req.headers.get('x-desktop-current-version')?.trim()
+    || url.searchParams.get('currentVersion')?.trim()
+    || null;
+  return {
+    installationId,
+    currentVersion,
+  };
+}
+
+function getDesktopFeedClientKey(req: Request): string {
+  const forwarded = req.headers.get('x-forwarded-for');
+  if (forwarded) {
+    return forwarded.split(',')[0]?.trim() || 'unknown';
+  }
+  return req.headers.get('x-real-ip') || 'unknown';
+}
+
+function checkDesktopFeedRateLimit(req: Request): Response | null {
+  const key = getDesktopFeedClientKey(req);
+  const nowMs = Date.now();
+  const current = desktopFeedRateLimitBuckets.get(key);
+  if (!current || nowMs >= current.resetAt) {
+    desktopFeedRateLimitBuckets.set(key, {
+      count: 1,
+      resetAt: nowMs + DESKTOP_FEED_RATE_LIMIT_WINDOW_MS,
+    });
+    return null;
+  }
+
+  current.count += 1;
+  if (current.count <= DESKTOP_FEED_RATE_LIMIT_MAX_REQUESTS) {
+    return null;
+  }
+
+  return Response.json(
+    { error: 'Rate limit exceeded for desktop feed requests' },
+    {
+      status: 429,
+      headers: {
+        'Retry-After': String(Math.ceil((current.resetAt - nowMs) / 1000)),
+      },
+    },
+  );
 }
 
 async function fetchJson(url: string, timeoutMs = 5000): Promise<Record<string, unknown> | null> {
@@ -593,7 +668,8 @@ function getCorsHeaders(req: Request): Record<string, string> {
   };
   if (req.method === 'OPTIONS') {
     headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
-    headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Deploy-Secret';
+    headers['Access-Control-Allow-Headers'] =
+      'Content-Type, X-Deploy-Secret, X-Desktop-Release-Signature, X-Desktop-Release-Timestamp, X-Desktop-Release-Delivery';
     headers['Access-Control-Max-Age'] = '86400';
   }
   return headers;
@@ -903,6 +979,12 @@ async function handleRequest(req: Request): Promise<Response> {
 
       // ── GET /desktop/releases — Desktop release history + rollout state ─────
       if (url.pathname === '/desktop/releases' && req.method === 'GET') {
+        if (!verifySecret(req)) {
+          return Response.json(
+            { error: 'Unauthorized: invalid or missing X-Deploy-Secret' },
+            { status: 401 },
+          );
+        }
         const channel = parseDesktopReleaseChannel(url.searchParams.get('channel'));
         return Response.json({
           releases: listDesktopReleases(channel ?? undefined),
@@ -920,7 +1002,14 @@ async function handleRequest(req: Request): Promise<Response> {
             { status: 404 },
           );
         }
-        return Response.json(release);
+        const rollout = getDesktopRollouts().find((item) => item.channel === channel);
+        const headers = new Headers({
+          'Cache-Control': 'no-store',
+        });
+        if (rollout?.minimumSupportedVersion) {
+          headers.set('X-Desktop-Minimum-Supported-Version', rollout.minimumSupportedVersion);
+        }
+        return Response.json(release, { headers });
       }
 
       // ── POST /desktop/releases/webhook — CI release ingest ───────────────────
@@ -1014,12 +1103,15 @@ async function handleRequest(req: Request): Promise<Response> {
         url.pathname.match(/^\/desktop\/feeds\/(stable|beta)\/(darwin|win32)\/(arm64|x64)\/latest(?:-mac(?:-arm64)?)?\.yml$/)
         && req.method === 'GET'
       ) {
+        const rateLimited = checkDesktopFeedRateLimit(req);
+        if (rateLimited) {
+          return rateLimited;
+        }
         const parts = url.pathname.split('/');
         const channel = parseDesktopReleaseChannel(parts[3] ?? null);
         const platform = parseDesktopReleasePlatform(parts[4] ?? null);
         const arch = parseDesktopReleaseArch(parts[5] ?? null);
-        const installationId = url.searchParams.get('installationId');
-        const currentVersion = url.searchParams.get('currentVersion');
+        const { installationId, currentVersion } = readDesktopFeedContext(req, url);
 
         if (!channel || !platform || !arch || !installationId) {
           return Response.json(
@@ -1060,6 +1152,10 @@ async function handleRequest(req: Request): Promise<Response> {
         url.pathname.match(/^\/desktop\/feeds\/(stable|beta)\/(darwin|win32)\/(arm64|x64)\/[^/]+$/)
         && req.method === 'GET'
       ) {
+        const rateLimited = checkDesktopFeedRateLimit(req);
+        if (rateLimited) {
+          return rateLimited;
+        }
         const parts = url.pathname.split('/');
         const channel = parseDesktopReleaseChannel(parts[3] ?? null);
         const platform = parseDesktopReleasePlatform(parts[4] ?? null);
@@ -1070,8 +1166,7 @@ async function handleRequest(req: Request): Promise<Response> {
           return Response.json({ error: 'Invalid feed asset path' }, { status: 400 });
         }
 
-        const installationId = url.searchParams.get('installationId');
-        const currentVersion = url.searchParams.get('currentVersion');
+        const { installationId, currentVersion } = readDesktopFeedContext(req, url);
         if (!channel || !platform || !arch || !installationId) {
           return Response.json(
             { error: 'channel, platform, arch, and installationId are required' },

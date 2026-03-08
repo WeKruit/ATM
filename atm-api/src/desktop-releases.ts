@@ -120,12 +120,14 @@ function initSchema(database: Database): void {
     CREATE TABLE IF NOT EXISTS desktop_rollouts (
       channel TEXT PRIMARY KEY CHECK (channel IN ('stable', 'beta')),
       baseline_release_id TEXT,
+      previous_baseline_release_id TEXT,
       candidate_release_id TEXT,
       rollout_percent INTEGER NOT NULL DEFAULT 0,
       minimum_supported_version TEXT,
       status TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'active', 'paused')),
       updated_at TEXT NOT NULL,
       FOREIGN KEY (baseline_release_id) REFERENCES desktop_releases(id),
+      FOREIGN KEY (previous_baseline_release_id) REFERENCES desktop_releases(id),
       FOREIGN KEY (candidate_release_id) REFERENCES desktop_releases(id)
     );
 
@@ -140,6 +142,17 @@ function initSchema(database: Database): void {
       FOREIGN KEY (release_id) REFERENCES desktop_releases(id)
     );
   `);
+
+  const rolloutColumns = database
+    .query<{ name: string }, []>(`PRAGMA table_info(desktop_rollouts)`)
+    .all()
+    .map((column) => column.name);
+  if (!rolloutColumns.includes("previous_baseline_release_id")) {
+    database.exec(`
+      ALTER TABLE desktop_rollouts
+      ADD COLUMN previous_baseline_release_id TEXT REFERENCES desktop_releases(id)
+    `);
+  }
 }
 
 function now(): string {
@@ -184,6 +197,7 @@ function getOrCreateRollout(database: Database, channel: DesktopReleaseChannel) 
     .query<{
       channel: DesktopReleaseChannel;
       baselineReleaseId: string | null;
+      previousBaselineReleaseId: string | null;
       candidateReleaseId: string | null;
       rolloutPercent: number;
       minimumSupportedVersion: string | null;
@@ -191,7 +205,9 @@ function getOrCreateRollout(database: Database, channel: DesktopReleaseChannel) 
       updatedAt: string;
     }, [DesktopReleaseChannel]>(
       `
-      SELECT channel, baseline_release_id AS baselineReleaseId, candidate_release_id AS candidateReleaseId,
+      SELECT channel, baseline_release_id AS baselineReleaseId,
+             previous_baseline_release_id AS previousBaselineReleaseId,
+             candidate_release_id AS candidateReleaseId,
              rollout_percent AS rolloutPercent, minimum_supported_version AS minimumSupportedVersion,
              status, updated_at AS updatedAt
       FROM desktop_rollouts
@@ -207,9 +223,9 @@ function getOrCreateRollout(database: Database, channel: DesktopReleaseChannel) 
     .prepare(
       `
       INSERT INTO desktop_rollouts (
-        channel, baseline_release_id, candidate_release_id, rollout_percent,
+        channel, baseline_release_id, previous_baseline_release_id, candidate_release_id, rollout_percent,
         minimum_supported_version, status, updated_at
-      ) VALUES (?, NULL, NULL, 0, NULL, 'idle', ?)
+      ) VALUES (?, NULL, NULL, NULL, 0, NULL, 'idle', ?)
     `,
     )
     .run(channel, createdAt);
@@ -217,12 +233,33 @@ function getOrCreateRollout(database: Database, channel: DesktopReleaseChannel) 
   return {
     channel,
     baselineReleaseId: null,
+    previousBaselineReleaseId: null,
     candidateReleaseId: null,
     rolloutPercent: 0,
     minimumSupportedVersion: null,
     status: "idle" as const,
     updatedAt: createdAt,
   };
+}
+
+function resolvePublicBaseline(
+  database: Database,
+  rollout: {
+    baselineReleaseId: string | null;
+    previousBaselineReleaseId?: string | null;
+  },
+): DesktopReleaseSummary | null {
+  const baseline = rollout.baselineReleaseId
+    ? hydrateReleaseSummary(database, rollout.baselineReleaseId)
+    : null;
+  if (baseline && !baseline.blocked) {
+    return baseline;
+  }
+
+  const previousBaseline = rollout.previousBaselineReleaseId
+    ? hydrateReleaseSummary(database, rollout.previousBaselineReleaseId)
+    : null;
+  return previousBaseline && !previousBaseline.blocked ? previousBaseline : null;
 }
 
 function hydrateReleaseSummary(database: Database, releaseId: string): DesktopReleaseSummary | null {
@@ -274,27 +311,6 @@ function getMetadataContent(
     )
     .get(releaseId, kind);
   return row?.content ?? null;
-}
-
-function semverCompare(left: string, right: string): number {
-  const split = (value: string) => {
-    const [core, prerelease = ""] = value.split("-", 2);
-    return {
-      parts: core.split(".").map((part) => Number.parseInt(part, 10) || 0),
-      prerelease,
-    };
-  };
-
-  const a = split(left);
-  const b = split(right);
-  for (let index = 0; index < 3; index += 1) {
-    const diff = (a.parts[index] ?? 0) - (b.parts[index] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  if (!a.prerelease && !b.prerelease) return 0;
-  if (!a.prerelease) return 1;
-  if (!b.prerelease) return -1;
-  return a.prerelease.localeCompare(b.prerelease);
 }
 
 function resolveAssetKind(platform: DesktopReleasePlatform, arch: DesktopReleaseArch, filename: string): string | null {
@@ -366,22 +382,26 @@ export function upsertDesktopRelease(input: DesktopReleaseInput): DesktopRelease
 
     const rollout = getOrCreateRollout(database, input.channel);
     if (input.channel === "beta") {
-      database
-        .prepare(
-          `
-          UPDATE desktop_rollouts
-          SET baseline_release_id = ?, candidate_release_id = NULL, rollout_percent = 100,
-              status = 'active', updated_at = ?
-          WHERE channel = 'beta'
-        `,
-        )
-        .run(releaseId, now());
+      if (!rollout.baselineReleaseId) {
+        database
+          .prepare(
+            `
+            UPDATE desktop_rollouts
+            SET baseline_release_id = ?, previous_baseline_release_id = NULL,
+                candidate_release_id = NULL, rollout_percent = 100,
+                status = 'active', updated_at = ?
+            WHERE channel = 'beta'
+          `,
+          )
+          .run(releaseId, now());
+      }
     } else if (!rollout.baselineReleaseId) {
       database
         .prepare(
           `
           UPDATE desktop_rollouts
-          SET baseline_release_id = ?, candidate_release_id = NULL, rollout_percent = 100,
+          SET baseline_release_id = ?, previous_baseline_release_id = NULL,
+              candidate_release_id = NULL, rollout_percent = 100,
               status = 'active', updated_at = ?
           WHERE channel = 'stable'
         `,
@@ -458,12 +478,13 @@ export function getDesktopRollouts(): DesktopRolloutSummary[] {
 export function activateDesktopRelease(releaseId: string, actor = "operator"): DesktopRolloutSummary {
   const database = getDb();
   const release = database
-    .query<{ id: string; channel: DesktopReleaseChannel; version: string }, [string]>(
-      `SELECT id, channel, version FROM desktop_releases WHERE id = ?`,
+    .query<{ id: string; channel: DesktopReleaseChannel; version: string; blocked: number }, [string]>(
+      `SELECT id, channel, version, blocked FROM desktop_releases WHERE id = ?`,
     )
     .get(releaseId);
 
   if (!release) throw new Error("Desktop release not found");
+  if (release.blocked) throw new Error("Blocked desktop releases cannot be activated");
 
   const tx = database.transaction(() => {
     const rollout = getOrCreateRollout(database, release.channel);
@@ -472,24 +493,41 @@ export function activateDesktopRelease(releaseId: string, actor = "operator"): D
         .prepare(
           `
           UPDATE desktop_rollouts
-          SET baseline_release_id = ?, candidate_release_id = NULL, rollout_percent = 100,
+          SET baseline_release_id = ?, previous_baseline_release_id = CASE
+                WHEN baseline_release_id IS NOT NULL AND baseline_release_id != ? THEN baseline_release_id
+                ELSE previous_baseline_release_id
+              END,
+              candidate_release_id = NULL, rollout_percent = 100,
               status = 'active', updated_at = ?
           WHERE channel = 'beta'
         `,
         )
-        .run(release.id, now());
+        .run(release.id, release.id, now());
     } else {
-      database
-        .prepare(
-          `
-          UPDATE desktop_rollouts
-          SET baseline_release_id = COALESCE(baseline_release_id, ?),
-              candidate_release_id = ?, rollout_percent = 0,
-              status = 'paused', updated_at = ?
-          WHERE channel = 'stable'
-        `,
-        )
-        .run(rollout.baselineReleaseId ?? release.id, release.id, now());
+      if (rollout.baselineReleaseId === release.id) {
+        database
+          .prepare(
+            `
+            UPDATE desktop_rollouts
+            SET candidate_release_id = NULL, rollout_percent = 100,
+                status = 'active', updated_at = ?
+            WHERE channel = 'stable'
+          `,
+          )
+          .run(now());
+      } else {
+        database
+          .prepare(
+            `
+            UPDATE desktop_rollouts
+            SET baseline_release_id = COALESCE(baseline_release_id, ?),
+                candidate_release_id = ?, rollout_percent = 0,
+                status = 'paused', updated_at = ?
+            WHERE channel = 'stable'
+          `,
+          )
+          .run(rollout.baselineReleaseId ?? release.id, release.id, now());
+      }
     }
 
     insertEvent(database, {
@@ -515,27 +553,35 @@ export function setDesktopRolloutPercent(
 ): DesktopRolloutSummary {
   const database = getDb();
   const release = database
-    .query<{ id: string; channel: DesktopReleaseChannel; version: string }, [string]>(
-      `SELECT id, channel, version FROM desktop_releases WHERE id = ?`,
+    .query<{ id: string; channel: DesktopReleaseChannel; version: string; blocked: number }, [string]>(
+      `SELECT id, channel, version, blocked FROM desktop_releases WHERE id = ?`,
     )
     .get(releaseId);
 
   if (!release) throw new Error("Desktop release not found");
+  if (release.blocked) throw new Error("Blocked desktop releases cannot be rolled out");
 
   const normalizedPercent = normalizePercent(rolloutPercent);
   const tx = database.transaction(() => {
     const rollout = getOrCreateRollout(database, release.channel);
     if (release.channel === "beta") {
+      if (normalizedPercent < 100) {
+        throw new Error("Beta releases can only be promoted at 100%");
+      }
       database
         .prepare(
           `
           UPDATE desktop_rollouts
-          SET baseline_release_id = ?, candidate_release_id = NULL, rollout_percent = 100,
+          SET baseline_release_id = ?, previous_baseline_release_id = CASE
+                WHEN baseline_release_id IS NOT NULL AND baseline_release_id != ? THEN baseline_release_id
+                ELSE previous_baseline_release_id
+              END,
+              candidate_release_id = NULL, rollout_percent = 100,
               status = 'active', updated_at = ?
           WHERE channel = 'beta'
         `,
         )
-        .run(release.id, now());
+        .run(release.id, release.id, now());
       return;
     }
 
@@ -544,12 +590,16 @@ export function setDesktopRolloutPercent(
         .prepare(
           `
           UPDATE desktop_rollouts
-          SET baseline_release_id = ?, candidate_release_id = NULL, rollout_percent = 100,
+          SET previous_baseline_release_id = CASE
+                WHEN baseline_release_id IS NOT NULL AND baseline_release_id != ? THEN baseline_release_id
+                ELSE previous_baseline_release_id
+              END,
+              baseline_release_id = ?, candidate_release_id = NULL, rollout_percent = 100,
               status = 'active', updated_at = ?
           WHERE channel = 'stable'
         `,
         )
-        .run(release.id, now());
+        .run(release.id, release.id, now());
     } else {
       database
         .prepare(
@@ -622,36 +672,52 @@ export function pauseDesktopRollout(releaseId: string, actor = "operator"): Desk
 export function rollbackDesktopRollout(releaseId: string, actor = "operator"): DesktopRolloutSummary {
   const database = getDb();
   const release = database
-    .query<{ id: string; channel: DesktopReleaseChannel; version: string }, [string]>(
-      `SELECT id, channel, version FROM desktop_releases WHERE id = ?`,
+    .query<{ id: string; channel: DesktopReleaseChannel; version: string; blocked: number }, [string]>(
+      `SELECT id, channel, version, blocked FROM desktop_releases WHERE id = ?`,
     )
     .get(releaseId);
 
   if (!release) throw new Error("Desktop release not found");
+  if (release.blocked) throw new Error("Desktop release is already blocked");
 
   const tx = database.transaction(() => {
+    const rollout = getOrCreateRollout(database, release.channel);
+    const previousBaseline = rollout.previousBaselineReleaseId
+      ? hydrateReleaseSummary(database, rollout.previousBaselineReleaseId)
+      : null;
+
+    if (release.id === rollout.baselineReleaseId && !previousBaseline) {
+      throw new Error("No previous baseline release is available for rollback");
+    }
+
     database.prepare(`UPDATE desktop_releases SET blocked = 1 WHERE id = ?`).run(release.id);
 
-    if (release.channel === "stable") {
+    if (release.id === rollout.candidateReleaseId) {
       database
         .prepare(
           `
           UPDATE desktop_rollouts
           SET candidate_release_id = NULL, rollout_percent = 100, status = 'active', updated_at = ?
-          WHERE channel = 'stable'
+          WHERE channel = ?
         `,
         )
-        .run(now());
-    } else {
+        .run(now(), release.channel);
+    } else if (release.id === rollout.baselineReleaseId) {
       database
         .prepare(
           `
           UPDATE desktop_rollouts
-          SET status = 'idle', updated_at = ?
-          WHERE channel = 'beta'
+          SET baseline_release_id = ?, previous_baseline_release_id = NULL,
+              candidate_release_id = NULL,
+              rollout_percent = 100,
+              status = 'active',
+              updated_at = ?
+          WHERE channel = ?
         `,
         )
-        .run(now());
+        .run(previousBaseline?.id ?? null, now(), release.channel);
+    } else {
+      throw new Error("Only the active baseline or candidate release can be rolled back");
     }
 
     insertEvent(database, {
@@ -702,22 +768,19 @@ export function setMinimumSupportedVersion(
 export function getLatestPublicRelease(channel: DesktopReleaseChannel): DesktopReleaseSummary | null {
   const database = getDb();
   const rollout = getOrCreateRollout(database, channel);
-  if (!rollout.baselineReleaseId) return null;
-  return hydrateReleaseSummary(database, rollout.baselineReleaseId);
+  return resolvePublicBaseline(database, rollout);
 }
 
 function resolveFeedRelease(channel: DesktopReleaseChannel, installationId: string): DesktopReleaseSummary | null {
   const database = getDb();
   const rollout = getOrCreateRollout(database, channel);
-  const baseline = rollout.baselineReleaseId
-    ? hydrateReleaseSummary(database, rollout.baselineReleaseId)
-    : null;
+  const baseline = resolvePublicBaseline(database, rollout);
   const candidate = rollout.candidateReleaseId
     ? hydrateReleaseSummary(database, rollout.candidateReleaseId)
     : null;
 
   if (channel === "beta") {
-    return baseline && !baseline.blocked ? baseline : null;
+    return baseline;
   }
 
   if (
@@ -738,7 +801,7 @@ function resolveFeedRelease(channel: DesktopReleaseChannel, installationId: stri
     }
   }
 
-  return baseline && !baseline.blocked ? baseline : null;
+  return baseline;
 }
 
 export function getFeedMetadata(input: {
@@ -751,10 +814,6 @@ export function getFeedMetadata(input: {
   const database = getDb();
   const release = resolveFeedRelease(input.channel, input.installationId);
   if (!release) return null;
-
-  if (input.currentVersion && semverCompare(release.version, input.currentVersion) < 0) {
-    return null;
-  }
 
   const kind =
     input.platform === "darwin"
@@ -783,10 +842,6 @@ export function resolveFeedAssetRedirect(input: {
 }): { release: DesktopReleaseSummary; url: string } | null {
   const release = resolveFeedRelease(input.channel, input.installationId);
   if (!release) return null;
-
-  if (input.currentVersion && semverCompare(release.version, input.currentVersion) < 0) {
-    return null;
-  }
 
   const kind = resolveAssetKind(input.platform, input.arch, input.filename);
   if (!kind) return null;

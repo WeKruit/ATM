@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { get, post } from '../api';
+import { getWithAuth, post } from '../api';
 import type {
   DesktopReleaseSummary,
   DesktopReleasesResponse,
@@ -37,9 +37,14 @@ export default function DesktopReleasesPage() {
   const secret = sessionStorage.getItem('atm-deploy-secret') || '';
 
   const fetchState = useCallback(async () => {
+    if (!secret) {
+      setError('Authenticate first — click the lock icon in the header');
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
-      const data = await get<DesktopReleasesResponse>('/desktop/releases');
+      const data = await getWithAuth<DesktopReleasesResponse>('/desktop/releases', secret);
       setReleases(data.releases);
       setRollouts(data.rollouts);
       setMinimumSupported({
@@ -52,7 +57,7 @@ export default function DesktopReleasesPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [secret]);
 
   useEffect(() => {
     void fetchState();
@@ -183,13 +188,6 @@ export default function DesktopReleasesPage() {
                     onClick={() => runAction('stable-rollback', () => post(`/desktop/releases/${rollout.candidateReleaseId}/rollback`, {}, secret))}
                   />
                 </>
-              )}
-              {rollout.channel === 'beta' && rollout.baselineReleaseId && (
-                <ActionButton
-                  busy={submitting === 'beta-activate'}
-                  label="Re-activate beta"
-                  onClick={() => runAction('beta-activate', () => post(`/desktop/releases/${rollout.baselineReleaseId}/activate`, {}, secret))}
-                />
               )}
             </div>
 
